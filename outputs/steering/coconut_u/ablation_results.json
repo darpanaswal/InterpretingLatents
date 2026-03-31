@@ -1,0 +1,26 @@
+{
+  "baseline_accuracy": 0.96,
+  "inlp_accuracy": 0.952,
+  "rand_accuracy": 0.958,
+  "accuracy_drop_inlp": 0.008000000000000007,
+  "accuracy_drop_rand": 0.0020000000000000018,
+  "temporal_verification": {
+    "original": {
+      "total": 24960.40625,
+      "timestep_pct": 99.15122606678327,
+      "instance_pct": 0.3491296247169736
+    },
+    "inlp": {
+      "total": 24703.24609375,
+      "timestep_pct": 99.36901795705934,
+      "instance_pct": 0.20302475798762687,
+      "temporal_retained_pct": 99.1871208988974
+    },
+    "rand": {
+      "total": 25888.267578125,
+      "timestep_pct": 99.37533539754261,
+      "instance_pct": 0.22783824901113128,
+      "temporal_retained_pct": 103.95176263886053
+    }
+  }
+}
