@@ -1,9 +1,9 @@
 {
-  "baseline_accuracy": 0.724,
-  "inlp_accuracy": 0.48,
-  "rand_accuracy": 0.868,
-  "accuracy_drop_inlp": 0.244,
-  "accuracy_drop_rand": -0.14400000000000002,
+  "baseline_accuracy": 0.954,
+  "inlp_accuracy": 0.954,
+  "rand_accuracy": 0.954,
+  "accuracy_drop_inlp": 0.0,
+  "accuracy_drop_rand": 0.0,
   "temporal_verification": {
     "original": {
       "total": 1160.2088623046875,
@@ -11,16 +11,16 @@
       "instance_pct": 52.61103478998375
     },
     "inlp": {
-      "total": 4720.82080078125,
-      "timestep_pct": 91.68021359831639,
-      "instance_pct": 4.102715336223,
-      "temporal_retained_pct": 1089.719806843463
+      "total": 4267.96923828125,
+      "timestep_pct": 89.17113546001104,
+      "instance_pct": 6.633740574805444,
+      "temporal_retained_pct": 958.2245433216833
     },
     "rand": {
-      "total": 4286.6767578125,
-      "timestep_pct": 91.47568308145901,
-      "instance_pct": 3.7752588843247734,
-      "temporal_retained_pct": 987.297666406803
+      "total": 4244.4921875,
+      "timestep_pct": 91.3502217947892,
+      "instance_pct": 3.9095785755206656,
+      "temporal_retained_pct": 976.2410329015541
     }
   }
 }

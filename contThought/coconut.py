@@ -1,5 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
+# Modified to support feedback_mode parameter:
+#   "continuous"        -> M2 (original COCONUT): recycle hidden states
+#   "pause_curriculum"  -> M3 (Pause): fixed learned embedding, single forward pass
+#   "pause_multipass"   -> M4 (Pause-Multipass): fixed learned embedding, sequential passes
 
 import torch
 import torch.nn as nn
@@ -20,6 +25,7 @@ class Coconut(nn.Module):
         start_latent_id,
         end_latent_id,
         eos_token_id,
+        feedback_mode="continuous",  # "continuous", "pause_curriculum", "pause_multipass"
     ):
 
         super(Coconut, self).__init__()
@@ -29,12 +35,29 @@ class Coconut(nn.Module):
         self.eos_token_id = eos_token_id
         self.start_latent_id = start_latent_id
         self.end_latent_id = end_latent_id
+        self.feedback_mode = feedback_mode
 
         # tested with GPT2 and Llama3
         if isinstance(self.base_causallm, GPT2LMHeadModel):
             self.embedding = self.base_causallm.transformer.get_input_embeddings()
+            hidden_size = self.base_causallm.config.n_embd
         else:
             self.embedding = self.base_causallm.get_input_embeddings()
+            hidden_size = self.base_causallm.config.hidden_size
+
+        # For pause modes: a single learned embedding vector (nn.Parameter)
+        # initialized from the same "<<" token embedding used for <|latent|> init
+        if self.feedback_mode in ("pause_curriculum", "pause_multipass"):
+            # Initialize with the <|latent|> token's current embedding
+            # (which was itself initialized from "<<" in run.py)
+            init_embed = self.embedding.weight.data[latent_token_id].clone()
+            self.pause_embedding = nn.Parameter(init_embed)
+
+    def _is_pause_mode(self):
+        return self.feedback_mode in ("pause_curriculum", "pause_multipass")
+
+    def _is_single_pass(self):
+        return self.feedback_mode == "pause_curriculum"
 
     def forward(self, input_ids, attention_mask, labels, position_ids, **kwargs):
 
@@ -54,6 +77,33 @@ class Coconut(nn.Module):
         next_compute_range = (0, input_ids.shape[1])
         inputs_embeds = self.embedding(input_ids)
 
+        # For pause modes: replace all latent token embeddings with the learned pause embedding
+        if self._is_pause_mode() and max_n_latents > 0:
+            for batch_idx in range(input_ids.shape[0]):
+                for pos in latent_lists[batch_idx]:
+                    inputs_embeds = inputs_embeds.clone()  # avoid in-place on leaf
+                    inputs_embeds[batch_idx, pos, :] = self.pause_embedding
+
+        # ---- M3 (pause_curriculum): single forward pass, no sequential loop ----
+        if self._is_single_pass():
+            outputs = self.base_causallm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                output_hidden_states=True,
+            )
+
+            logits = outputs.logits
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
+
+            return Outputs(loss=loss, inputs_embeds=inputs_embeds, logits=logits)
+
+        # ---- M2 (continuous) or M4 (pause_multipass): sequential multi-pass loop ----
         if max_n_latents > 0:
             next_compute_range = (0, latent_indices[:, 1].min().item())
             # before the earliest latent token position
@@ -101,9 +151,6 @@ class Coconut(nn.Module):
                 )
 
                 hidden_states_offset = next_compute_range[0]
-                # when we use kv_cache for the first k tokens
-                # in `outputs.hidden_states`, [0, k) will be skipped
-                # so we need to keep this offset to correctly use the last hidden states
 
             logits.append(outputs.logits)
 
@@ -140,14 +187,20 @@ class Coconut(nn.Module):
                 for batch_idx in range(inputs_embeds.shape[0])
             ]
 
-            # replace some of them with continuous thoughts
+            # replace some of them with continuous thoughts (M2) or pause embedding (M4)
             for idx_pair in filling_indices:
                 batch_idx, token_idx = idx_pair
 
-                # replace it with the preceding last hidden states
-                tensor_list[batch_idx][token_idx] = hidden_states[
-                    batch_idx, token_idx - 1 - hidden_states_offset, :
-                ]
+                if self.feedback_mode == "continuous":
+                    # M2: replace with the preceding last hidden states
+                    tensor_list[batch_idx][token_idx] = hidden_states[
+                        batch_idx, token_idx - 1 - hidden_states_offset, :
+                    ]
+                else:
+                    # M4 (pause_multipass): re-inject the same fixed pause embedding
+                    # The pause_embedding is already placed there, but we re-inject
+                    # to match the structure (the embedding doesn't change across passes)
+                    tensor_list[batch_idx][token_idx] = self.pause_embedding
 
             # assemble the new inputs_embeds
             inputs_embeds = torch.stack(
@@ -226,7 +279,13 @@ class Coconut(nn.Module):
         inputs_embeds = outputs.inputs_embeds
 
         # get the first token using the current hidden state
-        next_token = torch.argmax(outputs.logits[0, -1]).item()
+        if self._is_single_pass():
+            # M3: logits is (1, seq_len, vocab) — take last position
+            next_token = torch.argmax(outputs.logits[0, -1]).item()
+        else:
+            # M2/M4: logits is concatenated from multiple passes
+            next_token = torch.argmax(outputs.logits[0, -1]).item()
+
         tokens.append(next_token)
         new_token_embed = self.embedding(
             torch.tensor(next_token, device=input_ids.device)

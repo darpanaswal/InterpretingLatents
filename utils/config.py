@@ -33,14 +33,27 @@ if not openai_token or not hf_token or not wandb_token:
 
 # ─────────────────────────── Paths ─────────────────────────────────
 DATA_DIR = BASE_DIR / "data"
-BASE_GPT2 = BASE_DIR / "model/gpt2"
-COT_GPT2 = BASE_DIR / "model/prosqa-cot"
-PAUSE_GPT2 = BASE_DIR / "model/pause"
-COCONUT_GPT2 = BASE_DIR / "model/prosqa-coconut"
-COCONUT_GPT2_U = BASE_DIR / "model/prosqa-coconut-u0.3"
-PROSQA_TRAIN = BASE_DIR / "data/prosqa_train.json"
-PROSQA_VAL = BASE_DIR / "data/prosqa_valid.json"
-PROSQA_TEST = BASE_DIR / "data/prosqa_test.json"
+PROSQA_TRAIN = DATA_DIR / "prosqa_train.json"
+PROSQA_VAL = DATA_DIR / "prosqa_valid.json"
+PROSQA_TEST = DATA_DIR / "prosqa_test.json"
+GSM_TRAIN = DATA_DIR / "gsm_train.json"
+GSM_VAL = DATA_DIR / "gsm_valid.json"
+GSM_TEST = DATA_DIR / "gsm_test.json"
+
+
+MODEL_DIR = BASE_DIR / "model"
+BASE_GPT2 = MODEL_DIR / "gpt2"
+
+### Finetuned models
+PROSQA_MODELS = MODEL_DIR / "prosqa"
+GSM_MODELS = MODEL_DIR / "gsm"
+
+COT_GPT2 = BASE_DIR / "model/prosqa/cot"
+PAUSE_GPT2 = BASE_DIR / "model/prosqa/pause"
+COCONUT_GPT2 = BASE_DIR / "model/prosqa/coconut"
+COCONUT_GPT2_U = BASE_DIR / "model/prosqa/coconut-u0.3"
+
 OUTPUTS = BASE_DIR / "outputs"
 CONTROL_EXPT = OUTPUTS / "recursionControl"
+THOUGHTS = OUTPUTS / "thoughts"
 VQVAE = OUTPUTS / "vqvae"

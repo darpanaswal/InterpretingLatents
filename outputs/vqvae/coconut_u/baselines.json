@@ -1,9 +1,0 @@
-{
-  "model": "coconut_u",
-  "n_thoughts": 6,
-  "n_instances": 500,
-  "unquantized_accuracy": 0.96,
-  "k0_accuracy": 0.918,
-  "n_correct_unquantized": 480,
-  "n_correct_k0": 459
-}
