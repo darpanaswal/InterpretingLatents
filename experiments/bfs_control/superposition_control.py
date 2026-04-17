@@ -38,18 +38,9 @@ import json
 import torch
 import argparse
 from collections import defaultdict
-from contThought.coconut import Coconut
-from utils.utilities import clean_state_dict_keys
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from src.config import PROSQA_TEST, CONTROL_EXPT, Config
+from src.utils import setup_model_and_tokenizer, is_pause_model
 from contThought.dataset import get_dataset, get_question_latent_dataset
-from utils.config import (
-    BASE_GPT2,
-    PROSQA_MODELS,
-    GSM_MODELS,
-    PROSQA_TEST,
-    CONTROL_EXPT,
-    Config
-)
 
 # ============================================================================
 # GRAPH UTILITIES
@@ -140,21 +131,6 @@ def get_candidates_at_depth_k(instance, k):
 # PATH HELPERS
 # ============================================================================
 
-def get_checkpoint_path(task, mode):
-    model_path = PROSQA_MODELS if task == "prosqa" else GSM_MODELS
-    if mode == "base":
-        return None
-    if mode == "cot":
-        return str(model_path / "cot/best_checkpoint.pt")
-    if mode == "pause":
-        return str(model_path / "pause/checkpoint_best")
-    if mode == "coconut":
-        return str(model_path / "coconut/checkpoint_best")
-    if mode == "coconut_u":
-        return str(model_path / "coconut_u/checkpoint_best")
-    raise ValueError(f"Unsupported mode: {mode}")
-
-
 def get_output_path(task, mode):
     output_dir = CONTROL_EXPT / task
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -167,97 +143,6 @@ def get_output_path(task, mode):
         "coconut_u": "results_coconut_u.json",
     }
     return str(output_dir / filename_map[mode])
-
-# ============================================================================
-# MODEL + TOKENIZER SETUP
-# ============================================================================
-
-def setup_model_and_tokenizer(task, mode, device):
-    """
-    Load GPT-2, add Coconut special tokens, wrap in Coconut class.
-
-    Loading order matters and differs by mode:
-
-    --mode base:
-        1. Load pretrained GPT-2.
-        2. Add special tokens, resize embeddings, init with "<<".
-        3. Wrap in Coconut.
-
-    --mode cot:
-        1. Load pretrained GPT-2.
-        2. Load CoT checkpoint (plain GPT-2 state dict, original vocab).
-        3. Add special tokens, resize embeddings, init with "<<".
-        4. Wrap in Coconut.
-
-    --mode coconut / coconut_u / pause:
-        1. Load pretrained GPT-2.
-        2. Add special tokens, resize embeddings, init with "<<".
-        3. Wrap in Coconut.
-        4. Load checkpoint (keys: base_causallm.*).
-    """
-    checkpoint_path = get_checkpoint_path(task, mode)
-
-    model = AutoModelForCausalLM.from_pretrained(BASE_GPT2)
-    tokenizer = AutoTokenizer.from_pretrained(BASE_GPT2)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # --- CoT: load checkpoint BEFORE adding special tokens ---
-    if mode == "cot":
-        print(f"Loading CoT checkpoint: {checkpoint_path}")
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if missing:
-            print(f"  Missing keys (first 5): {missing[:5]}")
-        if unexpected:
-            print(f"  Unexpected keys (first 5): {unexpected[:5]}")
-
-    # --- Add special tokens (all modes) ---
-    tokenizer.add_tokens(["<|start-latent|>", "<|end-latent|>", "<|latent|>"])
-    latent_id = tokenizer.convert_tokens_to_ids("<|latent|>")
-    start_id = tokenizer.convert_tokens_to_ids("<|start-latent|>")
-    end_id = tokenizer.convert_tokens_to_ids("<|end-latent|>")
-
-    # Resize embeddings — run.py line 147
-    model.resize_token_embeddings(len(tokenizer))
-
-    # Initialize new token embeddings with "<<" — run.py lines 149-157
-    embeddings = model.get_input_embeddings()
-    target_id = tokenizer.convert_tokens_to_ids("<<")
-    for token_id in [latent_id, start_id, end_id]:
-        embeddings.weight.data[token_id] = embeddings.weight.data[target_id].clone()
-        model.lm_head.weight.data[token_id] = model.lm_head.weight.data[target_id].clone()
-
-    # --- Wrap in Coconut (all modes) ---
-    feedback_mode = "pause_curriculum" if mode == "pause" else "continuous"
-    coconut_model = Coconut(model, latent_id, start_id, end_id,
-                            tokenizer.eos_token_id,
-                            feedback_mode=feedback_mode)
-
-
-    # --- Coconut/Pause: load checkpoint AFTER wrapping ---
-    if mode in ("pause", "coconut", "coconut_u"):
-        print(f"Loading Coconut checkpoint: {checkpoint_path}")
-        raw_state_dict = torch.load(checkpoint_path, map_location="cpu")
-        state_dict = clean_state_dict_keys(raw_state_dict)
-
-        sample_key = next(iter(state_dict.keys()))
-        if not sample_key.startswith("base_causallm"):
-            print(f"  WARNING: first key is '{sample_key}'")
-            print(f"  Expected keys starting with 'base_causallm.*'.")
-
-        missing, unexpected = coconut_model.load_state_dict(state_dict, strict=False)
-        n_loaded = len(state_dict) - len(unexpected)
-        print(f"  Loaded {n_loaded}/{len(state_dict)} keys")
-        if missing:
-            print(f"  Missing (first 5): {missing[:5]}")
-        if unexpected:
-            print(f"  Unexpected (first 5): {unexpected[:5]}")
-
-    coconut_model = coconut_model.to(device)
-    coconut_model.eval()
-
-    return coconut_model, tokenizer, latent_id, start_id, end_id, checkpoint_path
-
 
 # ============================================================================
 # METRICS
@@ -352,6 +237,133 @@ def prepare_dataset_for_k(base_dataset, k, start_id, latent_id, end_id):
     )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Superposition probing: pause-aware
+# ═══════════════════════════════════════════════════════════════════
+
+@torch.no_grad()
+def probe_concept_probs_pauseaware(
+    coconut_model, tokenizer, input_ids, candidates, device, k,
+    start_id=None, latent_id=None, end_id_tok=None, sample=None,
+):
+    """
+    Probe concept probabilities after k thoughts.
+
+    For coconut: uses Coconut.forward() (recurrence), then probes.
+    For pause: builds input with k pause embeddings, runs single
+        forward pass, then probes from the last thought position.
+
+    The probing methodology is identical: feed " Every" prefix after
+    the thought positions, then compute p(concept) autoregressively.
+    """
+    import math
+
+    pause = is_pause_model(coconut_model)
+    base_model = coconut_model.base_causallm
+    embedding = coconut_model.embedding
+
+    if pause:
+        # Build input with pause embeddings for k thoughts
+        question_text = sample["question"]
+        question_tokens = tokenizer.encode(question_text + "\n", add_special_tokens=True)
+
+        input_ids_list = (
+            question_tokens
+            + [start_id]
+            + [latent_id] * k
+            + [end_id_tok]
+        )
+        input_ids_t = torch.tensor([input_ids_list], device=device)
+
+        inputs_embeds = embedding(input_ids_t)
+        pause_emb = coconut_model.pause_embedding
+        start_of_latent = len(question_tokens) + 1
+
+        for i in range(k):
+            pos = start_of_latent + i
+            inputs_embeds = inputs_embeds.clone()
+            inputs_embeds[0, pos, :] = pause_emb
+
+        # Single forward pass
+        full_outputs = base_model(
+            inputs_embeds=inputs_embeds,
+            output_hidden_states=True,
+            use_cache=True,
+        )
+        kv_cache = full_outputs.past_key_values
+        current_pos = inputs_embeds.shape[1]
+
+    else:
+        # Coconut: use forward() for recurrence, then get KV cache
+        attention_mask = torch.ones_like(input_ids, device=device)
+        labels = input_ids.clone()
+        position_ids = torch.arange(
+            0, input_ids.shape[1], dtype=torch.long, device=device
+        ).unsqueeze(0)
+
+        outputs = coconut_model.forward(
+            input_ids, attention_mask, labels, position_ids
+        )
+        inputs_embeds_out = outputs.inputs_embeds
+
+        full_outputs = base_model(inputs_embeds=inputs_embeds_out, use_cache=True)
+        kv_cache = full_outputs.past_key_values
+        current_pos = inputs_embeds_out.shape[1]
+
+    # From here, probing is identical for both models
+    prefix_tokens = tokenizer.encode(" Every", add_special_tokens=False)
+    prefix_out = None
+    for pt in prefix_tokens:
+        pt_embed = embedding(torch.tensor([[pt]], device=device))
+        pos_id = torch.tensor([[current_pos]], device=device)
+        prefix_out = base_model(
+            inputs_embeds=pt_embed,
+            past_key_values=kv_cache,
+            position_ids=pos_id,
+            use_cache=True,
+        )
+        kv_cache = prefix_out.past_key_values
+        current_pos += 1
+
+    if prefix_out is None:
+        raise RuntimeError('Prefix tokenization for " Every" returned no tokens.')
+
+    logits_at_concept = prefix_out.logits[0, 0, :]
+
+    concept_log_probs = {}
+    for concept_name, _ in candidates:
+        c_tokens = tokenizer.encode(" " + concept_name, add_special_tokens=False)
+        if len(c_tokens) == 0:
+            concept_log_probs[concept_name] = float("-inf")
+            continue
+
+        p_first = F.softmax(logits_at_concept, dim=-1)[c_tokens[0]].item()
+        log_p = math.log(p_first + 1e-30)
+
+        if len(c_tokens) > 1:
+            concept_cache = tuple((k_.clone(), v_.clone()) for k_, v_ in kv_cache)
+            concept_pos = current_pos
+
+            for i in range(len(c_tokens) - 1):
+                t_embed = embedding(torch.tensor([[c_tokens[i]]], device=device))
+                cp_id = torch.tensor([[concept_pos]], device=device)
+                c_out = base_model(
+                    inputs_embeds=t_embed,
+                    past_key_values=concept_cache,
+                    position_ids=cp_id,
+                    use_cache=True,
+                )
+                concept_cache = c_out.past_key_values
+                concept_pos += 1
+
+                p_next = F.softmax(c_out.logits[0, 0, :], dim=-1)
+                log_p += math.log(p_next[c_tokens[i + 1]].item() + 1e-30)
+
+        concept_log_probs[concept_name] = log_p
+
+    concept_probs = {c: math.exp(lp) for c, lp in concept_log_probs.items()}
+    return concept_probs, concept_log_probs
+
 # ============================================================================
 # MAIN EXPERIMENT
 # ============================================================================
@@ -360,7 +372,7 @@ def run_experiment(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    coconut_model, tokenizer, latent_id, start_id, end_id, checkpoint_path = \
+    coconut_model, _, tokenizer, latent_id, start_id, end_id, checkpoint_path = \
         setup_model_and_tokenizer(args.task, args.mode, device)
 
     print(f"Loading data: {PROSQA_TEST}")
@@ -394,7 +406,6 @@ def run_experiment(args):
 
             input_ids = torch.tensor([dataset_k[si]["input_ids"]], device=device)
 
-            from utils.pause_aware_utils import probe_concept_probs_pauseaware
             concept_probs, concept_log_probs = probe_concept_probs_pauseaware(
                 coconut_model, tokenizer, input_ids, candidates, device, k,
                 start_id=start_id, latent_id=latent_id,

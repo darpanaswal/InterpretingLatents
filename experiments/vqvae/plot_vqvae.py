@@ -23,7 +23,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from collections import defaultdict
-from utils.config import BASE_DIR, THOUGHTS
+from src.config import BASE_DIR, THOUGHTS
 
 
 # ── Configuration ───────────────────────────────────────────────────

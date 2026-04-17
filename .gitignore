@@ -1,8 +1,8 @@
 __pycache__
 runs
 .env
-*.sh
 model
-bash_runners
 reason
+reason_pyt
 *.pt
+.vscode

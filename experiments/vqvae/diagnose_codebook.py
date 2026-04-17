@@ -11,7 +11,7 @@ Usage:
 import torch
 import argparse
 from pathlib import Path
-from utils.config import THOUGHTS, VQVAE
+from src.config import THOUGHTS, VQVAE
 
 
 def load_thoughts(path):

@@ -33,9 +33,9 @@ import numpy as np
 from pathlib import Path
 from collections import Counter
 from contThought.coconut import Coconut
-from utils.utilities import clean_state_dict_keys
+from src.utils import clean_state_dict_keys
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from utils.config import BASE_GPT2, COCONUT_GPT2, COCONUT_GPT2_U, PAUSE_GPT2, PROSQA_TEST
+from src.config import BASE_GPT2, COCONUT_GPT2, COCONUT_GPT2_U, PAUSE_GPT2, PROSQA_TEST
 
 
 # ── Model loading (identical to extract_thoughts.py) ────────────────

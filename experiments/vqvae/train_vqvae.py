@@ -18,7 +18,7 @@ import argparse
 import numpy as np
 import torch.nn as nn
 from pathlib import Path
-from utils.config import VQVAE
+from src.config import VQVAE
 import torch.nn.functional as F
 
 
