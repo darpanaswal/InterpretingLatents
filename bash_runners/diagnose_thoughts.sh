@@ -1,6 +1,6 @@
 #!/bin/bash
 > runs/diagnose_thoughts.txt
-source reason_pyt/bin/activate
+source reason/bin/activate
 
 python -m experiments.probe_thoughts.diagnose_thoughts --reverse_inlp_iter 3 --task prosqa --model pause
 python -m experiments.probe_thoughts.diagnose_thoughts --reverse_inlp_iter 3 --task prosqa --model coconut
