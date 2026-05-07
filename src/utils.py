@@ -1,42 +1,75 @@
 import re
+import json
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from contThought.coconut import Coconut
-from src.config import BASE_GPT2, PROSQA_MODELS, GSM_MODELS
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from src.config import BASE_GPT2, PROSQA_MODELS, GSM_MODELS, PROSQA_TEST, GSM_TEST
+
+# CODI generates CoT reasoning before the answer on GSM8k, which can exceed
+# 128 tokens.  256 matches remove_thoughts.py / the original CODI test.py.
+MAX_DECODE_TOKENS = 256
 
 
-def extract_answer_number(text):
-    """Extract the last number from text as a float.
-    Matches CODI test.py's extract_answer_number exactly.
-    Returns float('inf') if no number is found."""
+def extract_answer_number(text: str, task: str = "gsm"):
+    """
+    Extract the answer based on the task.
+    Handles both CODI format ('The answer is:') and Coconut/Pause format ('###').
+    """
     text = text.replace(',', '')
+
+    if task == "prosqa":
+        # 1. Check for CODI format
+        if "The answer is:" in text:
+            ans = text.split("The answer is:")[-1].strip()
+            ans = ans.split("\n")[0].strip()
+            # CODI sometimes misses the period, so we enforce it
+            if not ans.endswith("."):
+                ans = ans + "."
+            return ans
+            
+        # 2. Check for Pause/Coconut format
+        elif "#" in text:
+            # Splits "### Bob is a shumpus." -> isolating the string after the last hash
+            ans = text.split("#")[-1].strip()
+            return ans
+            
+        # 3. Fallback
+        else:
+            return text.strip()
+
+    # --- GSM Logic (Numeric Extraction) ---
     pred = re.findall(r'-?\d+\.?\d*', text)
     if not pred:
         return float('inf')
+    
     return float(pred[-1])
 
 
 def _compare_answers(predicted_text, sample, task):
-    """Compare predicted answer to gold, returning (predicted_str, correct_str, is_correct).
-
-    For ProsQA: string comparison on the concept after '#### ' or '#'.
-    For GSM: numeric comparison via extract_answer_number.
-    """
+    """Compare predicted answer to gold, returning (predicted_str, correct_str, is_correct)."""
+    
+    # 1. Clean and extract the model's prediction using our unified function
+    pred_ans = extract_answer_number(predicted_text, task=task)
+    
+    # 2. Extract and format the gold ground truth
+    gold_text = sample.get("answer", "").replace(",", "").strip()
+    
     if task == "gsm":
-        pred_num = extract_answer_number(predicted_text)
-        gold_text = sample.get("answer", "").replace(",", "").strip()
-        # Gold answer may contain '####'; extract the part after it
+        # GSM gold answers have explanations. Isolate the number after "####" 
+        # so we don't accidentally extract a number from the explanation text.
         if "####" in gold_text:
             gold_text = gold_text.split("####")[-1].strip()
-        gold_num = extract_answer_number(gold_text)
-        return str(pred_num), str(gold_num), pred_num == gold_num
+        gold_ans = extract_answer_number(gold_text, task="gsm")
     else:
-        # ProsQA: original string comparison
-        answer = predicted_text.split("#")[-1].replace(",", "").strip()
-        correct_answer = sample.get("answer", "").replace(",", "").strip()
-        return answer, correct_answer, answer == correct_answer
+        # ProsQA gold answers are already the raw target string (e.g., "Sally is a sterpus.")
+        gold_ans = gold_text
+        
+    # 3. Compare and return! 
+    # (Converting to strings to maintain the original return signature)
+    return str(pred_ans), str(gold_ans), pred_ans == gold_ans
 
 def clean_state_dict_keys(state_dict):
     """
@@ -213,7 +246,7 @@ def _intervened_inference_pause(
     generated = []
     next_logits = outputs.logits[0, -1, :]
  
-    for _ in range(128):
+    for _ in range(MAX_DECODE_TOKENS):
         next_token = next_logits.argmax().item()
         if next_token == tokenizer.eos_token_id:
             break
@@ -280,7 +313,7 @@ def _intervened_inference_coconut(
 
     generated = []
     next_logits = outputs.logits[0, -1, :]
-    for _ in range(128):
+    for _ in range(MAX_DECODE_TOKENS):
         next_token = next_logits.argmax().item()
         if next_token == tokenizer.eos_token_id:
             break
@@ -391,7 +424,7 @@ def _alpha_sweep_coconut(
     generated_ids = [[] for _ in range(n_alphas)]
     finished = [False] * n_alphas
 
-    for _ in range(128):
+    for _ in range(MAX_DECODE_TOKENS):
         next_tokens = next_logits.argmax(dim=-1)
         for b_idx in range(n_alphas):
             if not finished[b_idx]:
@@ -549,7 +582,7 @@ def setup_model_and_tokenizer(task, mode, device):
 # Model loading: CODI
 # ═══════════════════════════════════════════════════════════════════
 
-def setup_codi_model(device, use_prj=True, prj_dim=768, remove_eos=True):
+def setup_codi_model(task, device, use_prj=True, prj_dim=768, remove_eos=True):
     """Load CODI model matching test.py configuration.
     
     Args:
@@ -557,24 +590,37 @@ def setup_codi_model(device, use_prj=True, prj_dim=768, remove_eos=True):
             format is [question] [bot] and the eot delimiter is [eot] only.
             If False, input is [question] [eos] [bot] and delimiter is [eot] [eos].
     """
-    codi_dir = GSM_MODELS / "codi"
+    if task == "gsm":
+        codi_dir = GSM_MODELS / "codi"
+    else:
+        codi_dir = PROSQA_MODELS / "codi"
 
     model = AutoModelForCausalLM.from_pretrained(
         str(BASE_GPT2), torch_dtype=torch.bfloat16,
     )
-    tokenizer = AutoTokenizer.from_pretrained(str(BASE_GPT2))
+    tokenizer = AutoTokenizer.from_pretrained(
+        "gpt2", 
+        use_fast=False,         # Match testing script
+        padding_side="left",    # Match testing script
+        model_max_length=1024   # Match testing script
+    )
     ori_vocab_size = model.config.vocab_size
     model.resize_token_embeddings(ori_vocab_size + 3)
     bot_id = ori_vocab_size + 1
     eot_id = ori_vocab_size + 2
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    tokenizer.pad_token_id = ori_vocab_size 
     hidden_size = model.config.n_embd
 
     from peft import LoraConfig, TaskType, get_peft_model
     lora_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM, inference_mode=True,
-        r=128, lora_alpha=32, lora_dropout=0.1,
-        target_modules=["c_attn", "c_proj", "c_fc"], init_lora_weights=True,
+        task_type=TaskType.CAUSAL_LM, 
+        inference_mode=True,
+        r=128, 
+        lora_alpha=32, 
+        lora_dropout=0.1,
+        target_modules=["c_attn", "c_proj", "c_fc"], 
+        init_lora_weights=True,
     )
     model = get_peft_model(model, lora_config)
 
@@ -631,3 +677,453 @@ def setup_codi_model(device, use_prj=True, prj_dim=768, remove_eos=True):
         'hidden_size': hidden_size, 'use_prj': use_prj,
         'remove_eos': remove_eos, 'ori_vocab_size': ori_vocab_size,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Data loading
+# ═══════════════════════════════════════════════════════════════════
+
+def load_data(task, max_instances=None):
+    path = PROSQA_TEST if task == "prosqa" else GSM_TEST
+    with open(path) as f:
+        data = json.load(f)
+    if max_instances:
+        data = data[:max_instances]
+    return data
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Serialization helpers
+# ═══════════════════════════════════════════════════════════════════
+
+def deep_convert(obj):
+    """Recursively convert numpy/torch types to native Python for JSON."""
+    if isinstance(obj, dict):
+        return {str(k): deep_convert(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [deep_convert(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, torch.Tensor):
+        return obj.tolist()
+    return obj
+
+
+def normalize_text_for_flip(text):
+    """
+    Canonicalize raw decoded text for flip comparison.
+
+    Strip whitespace and lowercase so that trivial formatting differences
+    don't register as flips. We intentionally do NOT parse numbers or
+    extract labels here — two different garbled outputs should register
+    as two different strings, not collapse into one 'inf' bucket.
+    """
+    if text is None:
+        return ""
+    return text.strip().lower()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Intervention closures
+# ═══════════════════════════════════════════════════════════════════
+
+def make_projection_intervention(projections, device):
+    """
+    Dtype-safe nullspace/subspace projection intervention.
+
+    Builds P_tensors in float32, upcasts h for the matmul, casts back:
+        # h_proj = (P_t @ h.float()).to(h.dtype)
+    """
+    P_tensors = {
+        t: torch.tensor(P, dtype=torch.float32, device=device)
+        for t, P in projections.items()
+    }
+
+    def intervention_fn(h, t):
+        if t not in P_tensors:
+            return h
+        orig_dtype = h.dtype
+        return (P_tensors[t] @ h.float()).to(orig_dtype)
+
+    return intervention_fn
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Eval loops (non-batched, per-instance)
+# ═══════════════════════════════════════════════════════════════════
+
+def run_eval_with_intervention(
+    coconut_model, base_model, tokenizer, end_id, data,
+    n_thoughts, device, intervention_fn, label="",
+    start_id=None, latent_id=None, task="prosqa",
+):
+    n_correct = 0
+    for idx, sample in enumerate(data):
+        if idx % 100 == 0:
+            print(f"    [{label}] {idx}/{len(data)}")
+        r = run_intervened_inference_pauseaware(
+            coconut_model, base_model, tokenizer, end_id, sample,
+            n_thoughts, device, intervention_fn,
+            start_id=start_id, latent_id=latent_id, task=task,
+        )
+        if r["is_correct"]:
+            n_correct += 1
+    accuracy = n_correct / len(data)
+    print(f"    [{label}] Accuracy: {n_correct}/{len(data)} = {accuracy:.1%}")
+    return accuracy
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CODI: non-batched eval wrappers
+# ═══════════════════════════════════════════════════════════════════
+
+@torch.no_grad()
+def run_codi_single_alpha(
+    codi_dict, sample, n_thoughts, device, intervention_fn,
+    task="gsm",
+):
+    """
+    Unbatched CODI inference with a per-step intervention_fn(h, t) -> h'.
+
+    Used for:
+      - baseline (intervention_fn = identity)
+      - ablation (intervention_fn = make_projection_intervention)
+      - sanity-check reference (one call per alpha, compared against
+        batched paths).
+
+    Mirrors random_corruption.run_codi_corruption_eval but factored so
+    any (h, t) -> h' callable can be plugged in.
+
+    Args:
+        task: "prosqa" or "gsm" — controls answer extraction logic.
+
+    Returns: {"predicted": str, "correct": str, "is_correct": bool,
+              "text": str}
+    """
+    base_model = codi_dict['model']
+    prj = codi_dict['prj']
+    tokenizer = codi_dict['tokenizer']
+    eot_id = codi_dict['eot_id']
+    embedding_fn = codi_dict['embedding_fn']
+    use_prj = codi_dict['use_prj']
+    remove_eos = codi_dict['remove_eos']
+    bot_id = codi_dict['bot_id']
+
+    # ── Step 0: encode prompt [question] ([eos]?) [bot] ──
+    question_tokens = tokenizer.encode(
+        sample["question"].strip().replace('  ', ' '),
+        add_special_tokens=True,
+    )
+    if remove_eos:
+        ids = question_tokens + [bot_id]
+    else:
+        ids = question_tokens + [tokenizer.eos_token_id, bot_id]
+    input_ids = torch.tensor([ids], device=device)
+    attention_mask = torch.ones_like(input_ids)
+    L = input_ids.size(1)
+    position_ids = torch.arange(L, device=device).unsqueeze(0)
+
+    outputs = base_model(
+        input_ids=input_ids, use_cache=True, output_hidden_states=True,
+        attention_mask=attention_mask, position_ids=position_ids,
+    )
+    past_kv = outputs.past_key_values
+    h = outputs.hidden_states[-1][0, -1, :]
+    h = intervention_fn(h, 0)
+
+    latent = h.unsqueeze(0).unsqueeze(0)
+    if use_prj and prj is not None:
+        latent = prj(latent)
+
+    # ── Steps 1..K ──
+    running_mask = attention_mask
+    for t in range(1, n_thoughts + 1):
+        running_mask = torch.cat(
+            [running_mask, torch.ones((1, 1), dtype=running_mask.dtype,
+                                      device=device)],
+            dim=1,
+        )
+        pos_t = torch.tensor([[L + t - 1]], device=device)
+
+        outputs = base_model(
+            inputs_embeds=latent, use_cache=True,
+            output_hidden_states=True, past_key_values=past_kv,
+            attention_mask=running_mask, position_ids=pos_t,
+        )
+        past_kv = outputs.past_key_values
+        h = outputs.hidden_states[-1][0, -1, :]
+        h = intervention_fn(h, t)
+
+        latent = h.unsqueeze(0).unsqueeze(0)
+        if use_prj and prj is not None:
+            latent = prj(latent)
+
+    # ── eot + ([eos]?) ──
+    if remove_eos:
+        eot_row = [eot_id]
+    else:
+        eot_row = [eot_id, tokenizer.eos_token_id]
+    eot_ids = torch.tensor([eot_row], device=device)
+    eot_emb = embedding_fn(eot_ids)
+    eot_len = eot_emb.size(1)
+
+    eot_pos = torch.arange(L + n_thoughts, L + n_thoughts + eot_len,
+                           device=device).unsqueeze(0)
+    running_mask = torch.cat(
+        [running_mask, torch.ones((1, eot_len), dtype=running_mask.dtype,
+                                  device=device)],
+        dim=1,
+    )
+    outputs = base_model(
+        inputs_embeds=eot_emb, use_cache=True, past_key_values=past_kv,
+        attention_mask=running_mask, position_ids=eot_pos,
+    )
+    past_kv = outputs.past_key_values
+    vocab_size = base_model.config.vocab_size
+    next_logits = outputs.logits[0, -1, :vocab_size - 1]
+
+    current_pos = L + n_thoughts + eot_len
+
+    # ── Greedy decode (embedding feed, eot excluded by clip) ──
+    generated = []
+    for _ in range(MAX_DECODE_TOKENS):
+        next_token = next_logits.argmax().item()
+        if next_token == tokenizer.eos_token_id:
+            break
+        generated.append(next_token)
+        next_emb = embedding_fn(
+            torch.tensor([next_token], device=device)
+        ).unsqueeze(0)
+        running_mask = torch.cat(
+            [running_mask, torch.ones((1, 1), dtype=running_mask.dtype,
+                                      device=device)],
+            dim=1,
+        )
+        decode_pos = torch.tensor([[current_pos]], device=device)
+        out = base_model(
+            inputs_embeds=next_emb,
+            past_key_values=past_kv,
+            use_cache=True,
+            attention_mask=running_mask,
+            position_ids=decode_pos,
+        )
+        next_logits = out.logits[0, -1, :vocab_size - 1]
+        past_kv = out.past_key_values
+        current_pos += 1
+
+    text = tokenizer.decode(generated, skip_special_tokens=True)
+    answer, correct_answer, is_correct = _compare_answers(text, sample, task)
+    return {"predicted": answer, "correct": correct_answer,
+            "is_correct": is_correct, "text": text}
+
+
+def run_codi_eval_with_intervention(
+    codi_dict, data, n_thoughts, device, intervention_fn, label="",
+    task="gsm",
+):
+    """CODI equivalent of run_eval_with_intervention (for ablation)."""
+    n_correct = 0
+    for idx, sample in enumerate(data):
+        if idx % 100 == 0:
+            print(f"    [{label}] {idx}/{len(data)}")
+        r = run_codi_single_alpha(
+            codi_dict, sample, n_thoughts, device, intervention_fn,
+            task=task,
+        )
+        if r["is_correct"]:
+            n_correct += 1
+    accuracy = n_correct / len(data)
+    print(f"    [{label}] Accuracy: {n_correct}/{len(data)} = {accuracy:.1%}")
+    return accuracy
+
+
+def run_codi_baseline(codi_dict, data, n_thoughts, device, task="gsm"):
+    """Run CODI baseline (identity intervention), returning
+    (baseline_acc, baseline_texts)."""
+    identity_fn = lambda h, t: h
+    baseline_texts = []
+    n_correct = 0
+    for idx, sample in enumerate(data):
+        if idx % 100 == 0:
+            print(f"    [Baseline] {idx}/{len(data)}")
+        r = run_codi_single_alpha(
+            codi_dict, sample, n_thoughts, device, identity_fn,
+            task=task,
+        )
+        baseline_texts.append(r["text"])
+        if r["is_correct"]:
+            n_correct += 1
+    return n_correct / len(data), baseline_texts
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Multi-GPU sharding utilities
+# ═══════════════════════════════════════════════════════════════════
+
+def _shard_indices(n_items, world_size, rank):
+    """Contiguous shard assignment: rank r handles items [r*chunk, (r+1)*chunk)."""
+    # chunk = ceil(n_items / world_size); last rank may be shorter
+    chunk = (n_items + world_size - 1) // world_size
+    start = rank * chunk
+    end = min(start + chunk, n_items)
+    return list(range(start, end))
+
+
+def _merge_shards(shards, alphas, n_total):
+    """
+    Merge per-rank partial results. flipped_indices are unioned (each
+    index appears in exactly one shard), then flip_rate is recomputed
+    against the full n_total.
+    """
+    merged = {}
+    for alpha in alphas:
+        all_indices = []
+        for s in shards:
+            all_indices.extend(s[alpha]["flipped_indices"])
+        all_indices = sorted(set(all_indices))
+        merged[alpha] = {
+            "n_flipped": len(all_indices),
+            "n_total": n_total,
+            "flip_rate": len(all_indices) / max(n_total, 1),
+            "flipped_indices": all_indices,
+        }
+    return merged
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Steering regime diagnostics
+# ═══════════════════════════════════════════════════════════════════
+#
+# The steering perturbation is  h' = h + alpha * d,  where d is a unit
+# vector along h's own concept-subspace projection. The relative
+# perturbation magnitude is therefore
+#
+#     # r = ||alpha * d|| / ||h|| = alpha / ||h||
+#
+# r partitions the sweep into three regimes:
+#
+#   - GENUINE  (r <= REGIME_GENUINE_MAX):
+#       Nudge is small relative to h; a flip here is evidence that the
+#       concept direction is causally used by the model.
+#
+#   - TRANSITION (REGIME_GENUINE_MAX < r <= REGIME_MAGNITUDE_MIN):
+#       Perturbation is comparable to h. Model is OOD in norm-space;
+#       flips here are ambiguous between direction-specific causality
+#       and generic OOD fragility.
+#
+#   - MAGNITUDE (r > REGIME_MAGNITUDE_MIN):
+#       h' is dominated by alpha * d. Original h is rounding error.
+#       A flip here is not evidence of direction causality — it's
+#       evidence that any large vector in the concept subspace
+#       (or a random subspace) breaks the forward pass.
+#
+# Values are defensible eyeballed cutoffs. Report exact r values
+# alongside regime labels in the paper; the labels are a reading aid.
+
+REGIME_GENUINE_MAX = 0.1
+REGIME_MAGNITUDE_MIN = 5.0
+
+
+def _regime_label(ratio):
+    """Map ||alpha*d|| / ||h|| to a three-way regime label."""
+    if ratio <= REGIME_GENUINE_MAX:
+        return "GENUINE"
+    if ratio <= REGIME_MAGNITUDE_MIN:
+        return "TRANSITION"
+    return "MAGNITUDE"
+
+
+def compute_alpha_regimes(thoughts, alphas):
+    """
+    For each alpha in the sweep, report what steering regime it falls
+    into given the empirical distribution of thought-vector norms.
+
+    Args:
+        thoughts: tensor of shape (N, T, D) — cached hidden states at
+            thought positions across N instances and T timesteps.
+        alphas: list of float alpha values.
+
+    Returns:
+        dict with:
+          - "norms_per_t": list[T] of dicts {median, p10, p90} of ||h_t||
+          - "median_pooled": float, median over all (n, t)
+          - "regimes_per_alpha": list, one entry per alpha:
+                { "alpha": float,
+                  "ratio_pooled": float,
+                  "regime_pooled": str,
+                  "ratio_per_t": list[T] of float,
+                  "regime_per_t": list[T] of str }
+
+    Math:
+        # h_norms[n, t] = ||thoughts[n, t, :]||_2
+        # median_t = median_n h_norms[n, t]
+        # ratio[alpha, t] = alpha / median_t
+    """
+    # h_norms: (N, T)
+    h_norms = thoughts.float().norm(dim=-1)
+    T = h_norms.shape[1]
+
+    median_per_t = h_norms.median(dim=0).values
+    p10_per_t = h_norms.quantile(0.1, dim=0)
+    p90_per_t = h_norms.quantile(0.9, dim=0)
+    median_pooled = h_norms.median().item()
+
+    norms_per_t = [
+        {"median": median_per_t[t].item(),
+         "p10": p10_per_t[t].item(),
+         "p90": p90_per_t[t].item()}
+        for t in range(T)
+    ]
+
+    regimes_per_alpha = []
+    for alpha in alphas:
+        ratio_pooled = alpha / median_pooled
+        ratio_per_t = [alpha / median_per_t[t].item() for t in range(T)]
+        regime_per_t = [_regime_label(r) for r in ratio_per_t]
+        regimes_per_alpha.append({
+            "alpha": alpha,
+            "ratio_pooled": ratio_pooled,
+            "regime_pooled": _regime_label(ratio_pooled),
+            "ratio_per_t": ratio_per_t,
+            "regime_per_t": regime_per_t,
+        })
+
+    return {
+        "norms_per_t": norms_per_t,
+        "median_pooled": median_pooled,
+        "regimes_per_alpha": regimes_per_alpha,
+    }
+
+
+def print_alpha_regimes(regime_info, alphas):
+    """Print the regime diagnostic table. Call this before the sweep runs."""
+    print("\n" + "=" * 70)
+    print("STEERING REGIME DIAGNOSTIC")
+    print("=" * 70)
+    print(f"  Model/task-specific regime boundaries depend on ||h||.")
+    print(f"  Thresholds: r <= {REGIME_GENUINE_MAX:g}  -> GENUINE")
+    print(f"              r <= {REGIME_MAGNITUDE_MIN:g}  -> TRANSITION")
+    print(f"              r >  {REGIME_MAGNITUDE_MIN:g}  -> MAGNITUDE (corruption-equivalent)")
+    print(f"    where r = alpha / median(||h_t||).")
+    print()
+
+    print(f"  Thought-vector norm ||h_t|| per timestep (median [p10, p90]):")
+    for t, n in enumerate(regime_info["norms_per_t"]):
+        print(f"    t={t}:  {n['median']:7.3f}   "
+              f"[{n['p10']:7.3f}, {n['p90']:7.3f}]")
+    print(f"    pooled median ||h|| = {regime_info['median_pooled']:.3f}")
+    print()
+
+    print(f"  {'alpha':>10}  {'r (pooled)':>12}  {'regime (pooled)':>18}  "
+          f"regime by t [t=0..T-1]")
+    print(f"  {'-'*10}  {'-'*12}  {'-'*18}  {'-'*40}")
+    for r in regime_info["regimes_per_alpha"]:
+        per_t_str = " ".join(lab[0] for lab in r["regime_per_t"])
+        print(f"  {r['alpha']:>10g}  {r['ratio_pooled']:>12.3f}  "
+              f"{r['regime_pooled']:>18}  {per_t_str}")
+    print(f"  (per-t legend: G=GENUINE, T=TRANSITION, M=MAGNITUDE)")
+    print()

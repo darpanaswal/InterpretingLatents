@@ -1,0 +1,53 @@
+\begin{table}[!t]
+\centering
+\tiny
+\setlength{\tabcolsep}{3pt}
+\caption{
+Original (with thoughts for LRMs; standard for B and CoT)
+vs.\ thought-ablated (\%) scores across models and tasks.
+}
+\begin{tabular}{llcccccc}
+\toprule
+Task & Condition & B & CoT & PaT & C & C$_u$ & CODI \\
+\midrule
+
+\multirow{2}{*}{\makecell[l]{Graph-\\Hopping}}
+& Original
+& 0
+& 79
+& $95.4 {\scriptstyle \pm 1.8}$
+& $98.0 {\scriptstyle \pm 1.3}$
+& $96.0 {\scriptstyle \pm 1.7}$
+& $80.0 {\scriptstyle \pm 3.5}$ \\
+
+& \makecell[l]{Thoughts\\Removed}
+& --
+& --\inlinecomment{12}
+& $95.6 {\scriptstyle \pm 1.7}$
+& $97.8 {\scriptstyle \pm 1.3}$
+& $91.8 {\scriptstyle \pm 2.4}$
+& $80.0 {\scriptstyle \pm 3.5}$ \\
+
+\midrule
+
+\multirow{2}{*}{\makecell[l]{Arithmetic-\\Reasoning}}
+& Original
+& 0
+& 42
+& $26.4 {\scriptstyle \pm 2.4}$
+& $35.7 {\scriptstyle \pm 2.5}$
+& $30.8 {\scriptstyle \pm 2.5}$
+& $41.8 {\scriptstyle \pm 2.7}$ \\
+
+& \makecell[l]{Thoughts\\Removed}
+& --
+& --\inlinecomment{23}
+& $21.4 {\scriptstyle \pm 2.2}$
+& $7.7 {\scriptstyle \pm 1.4}$
+& $39.1 {\scriptstyle \pm 2.6}$
+& $25.6 {\scriptstyle \pm 2.4}$ \\
+
+\bottomrule
+\end{tabular}
+\label{tab:model_performance}
+\end{table}

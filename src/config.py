@@ -49,6 +49,6 @@ PROSQA_MODELS = MODEL_DIR / "prosqa"
 GSM_MODELS = MODEL_DIR / "gsm"
 
 OUTPUTS = BASE_DIR / "outputs"
-CONTROL_EXPT = OUTPUTS / "recursionControl"
+CONTROL_EXPT = OUTPUTS / "superposition"
 THOUGHTS = OUTPUTS / "thoughts"
-VQVAE = OUTPUTS / "vqvae"
+INLP = OUTPUTS / "inlp"

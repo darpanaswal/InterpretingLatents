@@ -3,7 +3,9 @@ runs
 .env
 model
 reason
-reason_pyt
+primitive
 *.pt
 .vscode
 outputs
+.tex
+deprecated_experiments
