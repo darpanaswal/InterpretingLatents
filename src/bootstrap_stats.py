@@ -32,7 +32,7 @@ from typing import Callable, Optional, Sequence, Union
 # Configuration
 # ───────────────────────────────────────────────────────────────────────────
 
-DEFAULT_N_BOOT = 10_000
+DEFAULT_N_BOOT = 1000
 DEFAULT_CI = 95.0
 DEFAULT_SEED = 0
 

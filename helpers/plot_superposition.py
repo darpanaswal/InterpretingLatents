@@ -1,9 +1,33 @@
-# superposition_analyse.py
+# plot_superposition.py
 import json
 import argparse
 import math
 from pathlib import Path
 from src.config import CONTROL_EXPT
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times", "Times New Roman", "DejaVu Serif"],
+    "font.size": 7,
+    "axes.titlesize": 8,
+    "axes.labelsize": 7,
+    "xtick.labelsize": 6,
+    "ytick.labelsize": 6,
+    "legend.fontsize": 5.5,
+    "figure.dpi": 300,
+    "savefig.dpi": 300,
+    "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.02,
+    "axes.linewidth": 0.5,
+    "xtick.major.width": 0.4,
+    "ytick.major.width": 0.4,
+    "lines.linewidth": 1.0,
+    "lines.markersize": 3,
+    "text.usetex": False,
+})
 
 _MODES_ORDER = ["base", "cot", "pause", "coconut", "coconut_u", "codi"]
 _LABELS_SHORT = {
@@ -14,6 +38,29 @@ _LABELS_LONG = {
     "base": "Base", "cot": "CoT", "pause": "Pause", "coconut": "Coconut",
     "coconut_u": "Coconut$_{u}$", "codi": "CODI",
 }
+_PLOT_LABELS = {
+    "base": "B",
+    "cot": "CoT",
+    "pause": "PaT",
+    "coconut": "C",
+    "coconut_u": r"$C_u$",
+    "codi": "CODI",
+}
+_MODEL_STYLE = {
+    "base":      {"color": "#999999", "marker": "x",  "ls": ":"},
+    "cot":       {"color": "#E69F00", "marker": "^",  "ls": "--"},
+    "pause":     {"color": "#0072B2", "marker": "o",  "ls": "-"},
+    "coconut":   {"color": "#D55E00", "marker": "s",  "ls": "-"},
+    "coconut_u": {"color": "#009E73", "marker": "D",  "ls": "-"},
+    "codi":      {"color": "#CC79A7", "marker": "v",  "ls": "-."},
+}
+
+_PLOT_METRICS = [
+    ("mean_normalized_entropy", "normalized_entropy", "Entropy", r"$H/\log_2 N$", False, 2),
+    ("top1_correct_frac", "top1_is_correct", "Top-1 Correct", "Top-1 correct (%)", True, 1),
+    ("mean_value_correct", "value_correct", r"$P(\mathrm{correct})$", r"$P(\mathrm{correct})$", False, 2),
+    ("mean_candidate_mass", "candidate_mass", "Cand. Mass", "Cand. mass", False, 2),
+]
 
 def _load_all_results(task):
     results_dir = CONTROL_EXPT
@@ -25,6 +72,45 @@ def _load_all_results(task):
         with open(f) as fh:
             results[mode] = json.load(fh)
     return results, results_dir
+
+def _load_jsonl(path):
+    if not Path(path).exists():
+        return []
+    records = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+def _load_ci_records(results_dir, modes):
+    ci_dir = results_dir / "ci"
+    return {m: _load_jsonl(ci_dir / f"superposition_{m}.jsonl") for m in modes}
+
+def _context_matches(record, expected):
+    ctx = record.get("_context", {})
+    return all(ctx.get(key) == value for key, value in expected.items())
+
+def _find_ci_record(ci_records, metric, context=None):
+    context = context or {}
+    for record in reversed(ci_records):
+        if record.get("metric") == metric and _context_matches(record, context):
+            return record
+    return None
+
+def _ci_half_width(record, scale=1.0):
+    if record is None:
+        return None
+    return (record["ci_high"] - record["ci_low"]) * scale / 2
+
+def _fmt_endpoint(value, record=None, pct=False, decimals=1):
+    scale = 100 if pct else 1
+    point = value * scale
+    if record is None:
+        return f"{point:.{decimals}f}"
+    half = _ci_half_width(record, scale)
+    return f"{point:.{decimals}f}±{half:.{decimals}f}"
 
 def fmt_float(val, decimals=2):
     if math.isnan(val): return "-"
@@ -42,7 +128,7 @@ def fmt_pct(val):
     # Rounds to the nearest integer and removes decimals
     return f"{round(val * 100)}"
 
-def generate_main_table(results, modes, all_k):
+def generate_appendix_main_table(results, modes, all_k):
     num_m = len(modes)
     cols = "l " + " ".join(["c" * num_m] * 4)
     
@@ -51,7 +137,7 @@ def generate_main_table(results, modes, all_k):
         "\\centering",
         "\\tiny",
         "\\setlength{\\tabcolsep}{3pt}",
-        "\\caption{$P(\\text{correct})$ is the raw (unnormalized) joint probability summed over correct candidates. Candidate mass is the total raw probability assigned to all candidates at the depth frontier. Values $<0.01$ for PaT and C at $k{=}0{-}2$ reflect that these models were trained to reason through latent recurrence and assign near-zero probability to any concept before the recurrence has begun.}",
+        "\\caption{Appendix standard-probing table. $P(\\text{correct})$ is the raw (unnormalized) joint probability summed over correct candidates. Candidate mass is the total raw probability assigned to all candidates at the depth frontier. Point estimates are accompanied by bootstrap confidence intervals in the corresponding CI records emitted by the probing run. Values $<0.01$ for PaT and C at $k{=}0{-}2$ reflect that these models were trained to reason through latent recurrence and assign near-zero probability to any concept before the recurrence has begun.}",
         f"\\begin{{tabular}}{{{cols}}}",
         "\\toprule",
         "& \\multicolumn{" + str(num_m) + "}{c}{$H/\\log_2 N$} & \\multicolumn{" + str(num_m) + "}{c}{Top-1 correct (\\%)} & \\multicolumn{" + str(num_m) + "}{c}{$P(\\text{correct})$} & \\multicolumn{" + str(num_m) + "}{c}{Cand.\\ mass} \\\\"
@@ -94,11 +180,146 @@ def generate_main_table(results, modes, all_k):
     latex.extend([
         "\\bottomrule",
         "\\end{tabular}",
-        "\\label{tab:standard_probing}",
+        "\\label{tab:appendix_bfs_probing}",
         "\\end{table*}",
         ""
     ])
     return "\n".join(latex)
+
+def _metric_ylim(results, modes, all_k, summary_key, pct):
+    vals = []
+    for mode in modes:
+        for k in all_k:
+            value = results[mode]["summary"].get(str(k), {}).get(summary_key)
+            if value is None or math.isnan(value):
+                continue
+            vals.append(value * 100 if pct else value)
+    if not vals:
+        return (0, 1)
+    lo = min(vals)
+    hi = max(vals)
+    if pct:
+        return (max(-2, lo - 0.08 * max(hi - lo, 1)), min(105, hi + 0.18 * max(hi - lo, 1)))
+    if summary_key == "mean_normalized_entropy":
+        return (-0.02, 1.05)
+    pad = 0.18 * max(hi - lo, 0.01)
+    return (max(-0.01, lo - pad), hi + pad)
+
+def plot_superposition_metrics(results, modes, all_k, results_dir):
+    plot_k = [k for k in all_k if k <= 4]
+    if not plot_k:
+        print("No k<=4 timesteps available for superposition plot.")
+        return
+
+    ci_data = _load_ci_records(results_dir, modes)
+    
+    fig, axes = plt.subplots(1, 4, figsize=(9.5, 1.75), gridspec_kw={"wspace": 0.38})
+    axes_flat = axes.ravel()
+    panel_labels = ["(a)", "(b)", "(c)", "(d)"]
+
+    for ax, (summary_key, ci_key, title, ylabel, pct, decimals), panel_label in zip(
+        axes_flat, _PLOT_METRICS, panel_labels
+    ):
+        ylim = _metric_ylim(results, modes, plot_k, summary_key, pct)
+        endpoints = []
+
+        for mode in modes:
+            xs = []
+            ys = []
+            for k in plot_k:
+                value = results[mode]["summary"].get(str(k), {}).get(summary_key)
+                if value is None or math.isnan(value):
+                    continue
+                xs.append(k)
+                ys.append(value * 100 if pct else value)
+            if not xs:
+                continue
+            style = _MODEL_STYLE[mode]
+            ax.plot(
+                xs, ys,
+                color=style["color"],
+                marker=style["marker"],
+                ls=style["ls"],
+                label=_PLOT_LABELS[mode],
+                markeredgewidth=0.3,
+                markeredgecolor="black",
+            )
+            endpoints.append((ys[-1], mode, xs[-1], style["color"]))
+
+        y_range = ylim[1] - ylim[0]
+        min_gap = 0.10 * y_range
+
+        endpoints.sort(key=lambda item: item[0])
+        placed = []
+        staggered = []
+        
+        bottom_threshold = ylim[0] + 0.08 * y_range 
+
+        for item in endpoints:
+            y_val = item[0]
+            label_y = max(y_val, bottom_threshold)
+            
+            for py in placed:
+                if abs(label_y - py) < min_gap:
+                    label_y = py + min_gap
+            
+            label_y = min(label_y, ylim[1] - 0.03 * y_range)
+            placed.append(label_y)
+            staggered.append((*item, label_y))
+
+        line_extend = 0.5
+
+        for y_val, mode, x_val, color, label_y in staggered:
+            record = _find_ci_record(ci_data.get(mode, []), ci_key, {"t": int(x_val)})
+            raw_value = y_val / 100 if pct else y_val
+
+            x_pts = [x_val, x_val + 0.15, x_val + 0.4, x_val + line_extend]
+            y_pts = [y_val, y_val, label_y, label_y]
+            ax.plot(x_pts, y_pts, color=color, ls=(0, (1.2, 1.8)), linewidth=0.65, alpha=0.75, zorder=0)
+
+            ax.annotate(
+                _fmt_endpoint(raw_value, record, pct=pct, decimals=decimals),
+                xy=(x_val + line_extend, label_y),
+                xytext=(3, 0),
+                textcoords="offset points",
+                fontsize=5.5,
+                color=color,
+                weight="bold",
+                ha="left",
+                va="center",
+                clip_on=False
+            )
+
+        ax.set_xlabel("Thought step $k$")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{panel_label} {title}", fontsize=8, pad=6)
+        ax.set_ylim(*ylim)
+        
+        left_pad = -0.2
+        right_pad = 3
+        ax.set_xlim(min(plot_k) + left_pad, max(plot_k) + right_pad)
+        ax.set_xticks(plot_k)
+
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    
+    fig.legend(
+        handles, labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+        ncol=len(labels),
+        fontsize=6,
+        frameon=True,
+        framealpha=0.8,
+        edgecolor="#cccccc",
+        handlelength=2.0,
+        columnspacing=1.2,
+        handletextpad=0.5,
+    )
+
+    out_path = results_dir / "superposition_metrics.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved Superposition Figure to: {out_path}")
 
 def generate_table9(results, modes, all_k):
     num_m = len(modes)
@@ -108,8 +329,8 @@ def generate_table9(results, modes, all_k):
         "\\begin{table*}[h!]",
         "\\centering",
         "\\small",
-        "\setlength{\tabcolsep}{4pt}",
-        "\\caption{Cumulative top-$k$ raw probabilities. T1 = top-1, T3 = top-3, $\Delta$ = T3 $-$ T1. Coconut $u{=}0.0$ and Pause-as-thought show negligible gaps throughout, concentrating mass on a single candidate. Coconut $u{=}0.3$ shows substantial gaps at shallow $k$ (broad exploration) that narrow with depth.}",
+        "\\setlength{\\tabcolsep}{4pt}",
+        "\\caption{Cumulative top-$k$ raw probabilities. T1 = top-1, T3 = top-3, $\\Delta$ = T3 $-$ T1. Coconut $u{=}0.0$ and Pause-as-thought show negligible gaps throughout, concentrating mass on a single candidate. Coconut $u{=}0.3$ shows substantial gaps at shallow $k$ (broad exploration) that narrow with depth.}",
         f"\\begin{{tabular}}{{{cols}}}",
         "\\toprule",
     ]
@@ -200,7 +421,7 @@ def generate_table11(results, modes):
         "\\begin{table*}[h!]",
         "\\centering",
         "\\small",
-        "\\caption{Per-instance analysis. ``P(correct) increases'' counts instances where the raw probability summed over correct candidates is higher at the final $k$ evaluated for that instance than at $k{=}0$. The close match between Coconut $u{=}0.0$ (61.5\%) and Pause-as-thought (62.5\%) reinforces that the curriculum drives the convergence pattern.}",
+        "\\caption{Per-instance analysis. ``P(correct) increases'' counts instances where the raw probability summed over correct candidates is higher at the final $k$ evaluated for that instance than at $k{=}0$. The close match between Coconut $u{=}0.0$ (61.5\\%) and Pause-as-thought (62.5\\%) reinforces that the curriculum drives the convergence pattern.}",
         f"\\begin{{tabular}}{{{cols}}}",
         "\\toprule",
         " & " + " & ".join([_LABELS_LONG[m] for m in modes]) + " \\\\",
@@ -266,12 +487,15 @@ def run_analysis(task):
         int(k) for mode in available for k in all_results[mode]["summary"]
     })
     
-    # Save Main Table
-    main_latex = generate_main_table(all_results, available, all_k)
-    main_path = results_dir / "table_main.tex"
+    # Save appendix version of the former main table.
+    main_latex = generate_appendix_main_table(all_results, available, all_k)
+    main_path = "tables/table_appendix_bfs_probing.tex"
     with open(main_path, "w") as f:
         f.write(main_latex)
-    print(f"Saved Main Table to: {main_path}")
+    print(f"Saved Appendix Standard-Probing Table to: {main_path}")
+
+    # Save replacement main-text figure.
+    plot_superposition_metrics(all_results, available, all_k, results_dir)
     
     # Save Table 9
     t9_latex = generate_table9(all_results, available, all_k)

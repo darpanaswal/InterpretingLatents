@@ -442,6 +442,8 @@ def main():
                         default="coconut")
     parser.add_argument("--n_thoughts", type=int, default=6)
     parser.add_argument("--max_instances", type=int, default=None)
+    parser.add_argument("--n_boot", type=int, default=1000,
+                    help="Bootstrap iterations for all CIs.")
     parser.add_argument("--alpha_sweep", type=str,
                         default="0,0.5,1,1.5,2,5,10,25,50,100",
                         help="Comma-separated scaling factors. "
@@ -577,6 +579,7 @@ def main():
         baseline_correct, metric="baseline_accuracy",
         context={**ci_ctx, "condition": "baseline"},
         cis_jsonl=cis_jsonl,
+        n_boot=args.n_boot,
     )
 
     # ════════════════════════════════════════════════════════════════
@@ -596,6 +599,7 @@ def main():
         grad_correct, metric="grad_ablation_accuracy",
         context={**ci_ctx, "condition": "grad_nullspace"},
         cis_jsonl=cis_jsonl,
+        n_boot=args.n_boot,
     )
 
     # ── Random ablation: K independent seeds ─────────────────────
@@ -627,13 +631,14 @@ def main():
         # Per-seed CI record
         seed_acc = sum(rand_correct_k) / max(N, 1)
         rand_correct_per_seed_accs.append(seed_acc)
-        seed_ci = report_mean_with_ci(
-            rand_correct_k, metric="rand_ablation_accuracy",
-            context={**ci_ctx, "condition": "rand_nullspace",
-                     "seed": s_k, "seed_index": k,
-                     "n_random_seeds": K},
-            cis_jsonl=cis_jsonl,
-        )
+        # seed_ci = report_mean_with_ci(
+        #     rand_correct_k, metric="rand_ablation_accuracy",
+        #     context={**ci_ctx, "condition": "rand_nullspace",
+        #              "seed": s_k, "seed_index": k,
+        #              "n_random_seeds": K},
+        #     cis_jsonl=cis_jsonl,
+        #     n_boot=args.n_boot,
+        # )
 
         # Accumulate into pooled vector, then free per-seed data
         rand_correct_pooled.extend(rand_correct_k)
@@ -665,6 +670,7 @@ def main():
     rand_ci = bootstrap_mean(
         rand_correct_pooled,
         metric="rand_ablation_accuracy",
+        n_boot=args.n_boot,
     )
     save_record(cis_jsonl, rand_ci,
                 context={**ci_ctx, "condition": "rand_nullspace_pooled",
@@ -679,6 +685,7 @@ def main():
     grad_drop_ci = paired_bootstrap_diff(
         baseline_correct, grad_correct,
         metric="accuracy_drop_grad",
+        n_boot=args.n_boot,
     )
     save_record(cis_jsonl, grad_drop_ci,
                 context={**ci_ctx, "condition": "baseline_minus_grad"})
@@ -691,6 +698,7 @@ def main():
     rand_drop_ci = paired_bootstrap_diff(
         baseline_rep, rand_correct_pooled,
         metric="accuracy_drop_rand",
+        n_boot=args.n_boot,
     )
     save_record(cis_jsonl, rand_drop_ci,
                 context={**ci_ctx, "condition": "baseline_minus_rand",
@@ -845,15 +853,16 @@ def main():
                 rand_amp_k[alpha]["flip_rate"]
             )
 
-            # Per-seed CI record
-            seed_ci = bootstrap_mean(
-                flip_k,
-                metric=f"flip_rate_rand_a{alpha}",
-            )
-            save_record(cis_jsonl, seed_ci,
-                        context={**ci_ctx, "condition": "rand_amp",
-                                 "alpha": alpha, "seed": s_k,
-                                 "seed_index": k, "n_random_seeds": K})
+            # # Per-seed CI record
+            # seed_ci = bootstrap_mean(
+            #     flip_k,
+            #     metric=f"flip_rate_rand_a{alpha}",
+            #     n_boot=args.n_boot,
+            # )
+            # save_record(cis_jsonl, seed_ci,
+            #             context={**ci_ctx, "condition": "rand_amp",
+            #                      "alpha": alpha, "seed": s_k,
+            #                      "seed_index": k, "n_random_seeds": K})
 
         del subspace_rand_k, rand_amp_k
 
@@ -879,7 +888,7 @@ def main():
             rand_flip_pooled[alpha], dtype=np.float64,
         )
 
-        g_ci = bootstrap_mean(grad_flip, metric=f"flip_rate_grad_a{alpha}")
+        g_ci = bootstrap_mean(grad_flip, metric=f"flip_rate_grad_a{alpha}", n_boot=args.n_boot,)
         save_record(cis_jsonl, g_ci,
                     context={**ci_ctx, "condition": "grad_amp", "alpha": alpha})
 
@@ -887,6 +896,7 @@ def main():
         r_ci = bootstrap_mean(
             rand_flip_pool_arr,
             metric=f"flip_rate_rand_a{alpha}",
+            n_boot=args.n_boot,
         )
         save_record(cis_jsonl, r_ci,
                     context={**ci_ctx, "condition": "rand_amp_pooled",
@@ -914,6 +924,7 @@ def main():
         d_ci = paired_bootstrap_diff(
             grad_flip_rep, rand_flip_pool_arr,
             metric=f"flip_diff_grad_minus_rand_a{alpha}",
+            n_boot=args.n_boot,
         )
         save_record(cis_jsonl, d_ci,
                     context={**ci_ctx, "condition": "grad_minus_rand_amp",

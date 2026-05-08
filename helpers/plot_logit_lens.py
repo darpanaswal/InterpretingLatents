@@ -82,6 +82,103 @@ def load_json(data_dir, task, model, k=6):
         return json.load(f)
 
 
+def load_jsonl(path):
+    if not Path(path).exists():
+        return []
+    records = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def load_ci_records(data_dir, task, model, k=6):
+    return load_jsonl(Path(data_dir) / f"{task}_{model}_k{k}_cis.jsonl")
+
+
+def _context_matches(record, expected):
+    ctx = record.get("_context", {})
+    return all(ctx.get(key) == value for key, value in expected.items())
+
+
+def find_ci_record(ci_records, metric, context=None):
+    """
+    Return the most recent matching CI record.
+
+    The experiment scripts append JSONL records, so the last match is the one
+    corresponding to the most recent run when a file has been regenerated.
+    """
+    context = context or {}
+    for record in reversed(ci_records):
+        if record.get("metric") == metric and _context_matches(record, context):
+            return record
+    return None
+
+
+def ci_half_width_pct(record):
+    if record is None:
+        return None
+    return (record["ci_high"] - record["ci_low"]) * 100 / 2
+
+
+def fmt_pm_pct(point_pct, record=None, decimals=1, latex=False):
+    if record is None:
+        return f"{point_pct:.{decimals}f}"
+    half_width = ci_half_width_pct(record)
+    if latex:
+        return (
+            rf"${point_pct:.{decimals}f}"
+            rf" {{\scriptstyle \pm {half_width:.{decimals}f}}}$"
+        )
+    return f"{point_pct:.{decimals}f}±{half_width:.{decimals}f}"
+
+
+def fmt_ci_pct(record, decimals=1):
+    if record is None:
+        return "--"
+    p = record["point"] * 100
+    lo = record["ci_low"] * 100
+    hi = record["ci_high"] * 100
+    return f"{p:.{decimals}f} [{lo:.{decimals}f}, {hi:.{decimals}f}]"
+
+
+def fmt_n(record, fallback=None):
+    if record is not None and record.get("n") is not None:
+        return str(record["n"])
+    return str(fallback) if fallback is not None else "--"
+
+
+def fmt_point_pct(point, decimals=1):
+    if point is None:
+        return "--"
+    return f"{point * 100:.{decimals}f}"
+
+
+def fmt_point_or_ci_pct(point, record=None, decimals=1):
+    if record is not None:
+        return fmt_ci_pct(record, decimals)
+    return fmt_point_pct(point, decimals)
+
+
+def latex_escape(value):
+    text = str(value)
+    repl = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(repl.get(ch, ch) for ch in text)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Figure 1: GSM8k step-wise metrics (2 rows × 2 cols)
 # ═══════════════════════════════════════════════════════════════════
@@ -127,6 +224,10 @@ def plot_gsm_stepwise(data_dir, out_dir, k=6):
         d = load_json(data_dir, "gsm", model, k)
         if d is not None:
             all_data[model] = d
+    ci_data = {
+        model: load_ci_records(data_dir, "gsm", model, k)
+        for model in all_data
+    }
 
     steps = list(range(k + 1))  # 0..6
 
@@ -152,6 +253,7 @@ def plot_gsm_stepwise(data_dir, out_dir, k=6):
     ax = axes[0, 0]
     attn_models = []
     prompt_vals, latent_vals, self_vals = [], [], []
+    prompt_cis, latent_cis, self_cis = [], [], []
     
     for model in GSM_MODELS:
         if model not in all_data:
@@ -163,6 +265,11 @@ def plot_gsm_stepwise(data_dir, out_dir, k=6):
             prompt_vals.append(am.get("mean_prompt", 0) * 100)
             latent_vals.append(am.get("mean_latent", 0) * 100)
             self_vals.append(am.get("mean_self", 0) * 100)
+            records = ci_data.get(model, [])
+            ctx = {"condition": "end_token"}
+            prompt_cis.append(find_ci_record(records, "attn_prompt", ctx))
+            latent_cis.append(find_ci_record(records, "attn_latent", ctx))
+            self_cis.append(find_ci_record(records, "attn_self", ctx))
 
     x_bar = np.arange(len(attn_models))
     w = 0.6
@@ -175,11 +282,14 @@ def plot_gsm_stepwise(data_dir, out_dir, k=6):
     # Value labels centered inside each segment (skip if segment is too small)
     for i in range(len(x_bar)):
         if prompt_vals[i] > 4:
-            ax.text(x_bar[i], prompt_vals[i] / 2, f"{prompt_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="white")
+            ax.text(x_bar[i], prompt_vals[i] / 2, fmt_pm_pct(prompt_vals[i], prompt_cis[i]),
+                    ha="center", va="center", fontsize=3.8, color="white")
         if latent_vals[i] > 4:
-            ax.text(x_bar[i], prompt_vals[i] + latent_vals[i] / 2, f"{latent_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="white")
+            ax.text(x_bar[i], prompt_vals[i] + latent_vals[i] / 2, fmt_pm_pct(latent_vals[i], latent_cis[i]),
+                    ha="center", va="center", fontsize=3.8, color="white")
         if self_vals[i] > 4:
-            ax.text(x_bar[i], bottoms[i] + self_vals[i] / 2, f"{self_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="black")
+            ax.text(x_bar[i], bottoms[i] + self_vals[i] / 2, fmt_pm_pct(self_vals[i], self_cis[i]),
+                    ha="center", va="center", fontsize=3.8, color="black")
 
     ax.set_xticks(x_bar)
     ax.set_xticklabels([MODEL_LABELS[m] for m in attn_models])
@@ -261,9 +371,14 @@ def plot_gsm_stepwise(data_dir, out_dir, k=6):
             ax_height_pts = ax.get_position().height * fig.get_size_inches()[1] * 72
             pts_per_data = ax_height_pts / y_range
             dy_pts = (label_y - y_val) * pts_per_data
+            ci = find_ci_record(
+                ci_data.get(model, []),
+                key,
+                {"condition": "per_step", "t": int(k)},
+            )
 
             ax.annotate(
-                f"{y_val:.1f}", xy=(k, y_val),
+                fmt_pm_pct(y_val, ci), xy=(k, y_val),
                 xytext=(4, dy_pts),
                 textcoords="offset points",
                 fontsize=4.5, color=color, ha="left", va="center",
@@ -479,16 +594,22 @@ def plot_prosqa_attention(data_dir, out_dir, k=6):
 
     models_with_attn = []
     prompt_vals, latent_vals, self_vals = [], [], []
+    prompt_cis, latent_cis, self_cis = [], [], []
 
     for model in PROSQA_MODELS:
         d = load_json(data_dir, "prosqa", model, k)
         if d is None or d.get("attention") is None:
             continue
         attn = d["attention"]
+        records = load_ci_records(data_dir, "prosqa", model, k)
+        ctx = {"condition": "end_token"}
         models_with_attn.append(model)
         prompt_vals.append(attn["mean_prompt"] * 100)
         latent_vals.append(attn["mean_latent"] * 100)
         self_vals.append(attn["mean_self"] * 100)
+        prompt_cis.append(find_ci_record(records, "attn_prompt", ctx))
+        latent_cis.append(find_ci_record(records, "attn_latent", ctx))
+        self_cis.append(find_ci_record(records, "attn_self", ctx))
 
     x = np.arange(len(models_with_attn))
     w = 0.55
@@ -502,11 +623,14 @@ def plot_prosqa_attention(data_dir, out_dir, k=6):
     # --- NEW CODE: Add numbers inside segments ---
     for i in range(len(x)):
         if prompt_vals[i] > 4:
-            ax.text(x[i], prompt_vals[i] / 2, f"{prompt_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="white")
+            ax.text(x[i], prompt_vals[i] / 2, fmt_pm_pct(prompt_vals[i], prompt_cis[i]),
+                    ha="center", va="center", fontsize=3.8, color="white")
         if latent_vals[i] > 4:
-            ax.text(x[i], prompt_vals[i] + latent_vals[i] / 2, f"{latent_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="white")
+            ax.text(x[i], prompt_vals[i] + latent_vals[i] / 2, fmt_pm_pct(latent_vals[i], latent_cis[i]),
+                    ha="center", va="center", fontsize=3.8, color="white")
         if self_vals[i] > 4:
-            ax.text(x[i], bottoms[i] + self_vals[i] / 2, f"{self_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="black")
+            ax.text(x[i], bottoms[i] + self_vals[i] / 2, fmt_pm_pct(self_vals[i], self_cis[i]),
+                    ha="center", va="center", fontsize=3.8, color="black")
     # ---------------------------------------------
 
     ax.set_xticks(x)
@@ -539,12 +663,20 @@ def plot_line_metrics(data_dir, out_dir, k=6):
     for model in GSM_MODELS:
         d = load_json(data_dir, "gsm", model, k)
         if d is not None: gsm_data[model] = d
+    gsm_cis = {
+        model: load_ci_records(data_dir, "gsm", model, k)
+        for model in gsm_data
+    }
 
-    fig, axes = plt.subplots(1, 3, figsize=(6.75, 1), gridspec_kw={'wspace': 0.3})
+    fig, axes = plt.subplots(1, 3, figsize=(8.2, 1.35), gridspec_kw={'wspace': 0.28})
 
-    def _plot_line_panel(ax, key, title_str, ylim, ylabel, panel_label, skip_below=None):
+    def _plot_line_panel(ax, key, title_str, ylim, ylabel, panel_label,
+                         skip_below=None, annotate="endpoint_right"):
         steps = list(range(k + 1))
         endpoints = []
+        peaks = []
+        starts = []
+        
         for model in GSM_MODELS:
             if model not in gsm_data: continue
             vals = [gsm_data[model]["summary"][str(t)][key] for t in steps]
@@ -552,60 +684,147 @@ def plot_line_metrics(data_dir, out_dir, k=6):
             s = MODEL_STYLE[model]
             ax.plot(steps, pcts, color=s["color"], marker=s["marker"], ls=s["ls"], 
                     label=MODEL_LABELS[model], markeredgewidth=0.3, markeredgecolor="black")
+            
             endpoints.append((pcts[-1], model, s["color"]))
+            peak_t = int(np.argmax(pcts))
+            peaks.append((pcts[peak_t], peak_t, model, s["color"]))
+            starts.append((pcts[0], 0, model, s["color"]))
 
-        endpoints.sort(key=lambda e: e[0])
         y_range = ylim[1] - ylim[0]
-        min_gap = 0.08 * y_range  
-        placed = []
+        min_gap = 0.10 * y_range  
 
-        for y_val, model, color in endpoints:
-            if model == "base": continue
-            if skip_below is not None and y_val < skip_below: continue
-            label_y = y_val
-            for py in placed:
-                if abs(label_y - py) < min_gap: label_y = py + min_gap
-            placed.append(label_y)
+        def _stagger(items, value_idx=0):
+            items = sorted(items, key=lambda e: e[value_idx])
+            placed = []
+            out = []
+            for item in items:
+                y_val = item[value_idx]
+                label_y = y_val
+                for py in placed:
+                    if abs(label_y - py) < min_gap:
+                        label_y = py + min_gap
+                label_y = min(label_y, ylim[1] - 0.03 * y_range)
+                placed.append(label_y)
+                out.append((*item, label_y))
+            return out
 
-            ax_height_pts = ax.get_position().height * fig.get_size_inches()[1] * 72
-            pts_per_data = ax_height_pts / y_range
-            dy_pts = (label_y - y_val) * pts_per_data
+        line_extend = 0.5  
+        
+        if annotate == "endpoint_right":
+            for y_val, model, color, label_y in _stagger(endpoints):
+                if model == "base": continue
+                if skip_below is not None and y_val < skip_below: continue
 
-            ax.annotate(f"{y_val:.1f}", xy=(k, y_val), xytext=(4, dy_pts), 
-                        textcoords="offset points", fontsize=4.5, color=color, ha="left", va="center")
+                ci = find_ci_record(
+                    gsm_cis.get(model, []),
+                    key,
+                    {"condition": "per_step", "t": int(k)},
+                )
+
+                x_pts = [k, k + 0.15, k + 0.4, k + line_extend]
+                y_pts = [y_val, y_val, label_y, label_y]
+                ax.plot(x_pts, y_pts, color=color, ls=(0, (1.2, 1.8)), linewidth=0.65, alpha=0.75, zorder=0)
+
+                ax.annotate(fmt_pm_pct(y_val, ci), xy=(k + line_extend, label_y), xytext=(3, 0),
+                            textcoords="offset points", fontsize=5.5, color=color, weight="bold",
+                            ha="left", va="center", clip_on=False)
+                            
+        elif annotate == "peak_right":
+            for y_val, peak_t, model, color, label_y in _stagger(peaks):
+                if model == "base": continue
+                if skip_below is not None and y_val < skip_below: continue
+                
+                ci = find_ci_record(
+                    gsm_cis.get(model, []),
+                    key,
+                    {"condition": "per_step", "t": int(peak_t)},
+                )
+                
+                x_pts = [peak_t, k + 0.15, k + 0.4, k + line_extend]
+                y_pts = [y_val, y_val, label_y, label_y]
+                ax.plot(x_pts, y_pts, color=color, ls=(0, (1.2, 1.8)), linewidth=0.65, alpha=0.75, zorder=0)
+                
+                ax.annotate(
+                    fmt_pm_pct(y_val, ci), xy=(k + line_extend, label_y), xytext=(3, 0),
+                    textcoords="offset points", fontsize=5.5, color=color, weight="bold",
+                    ha="left", va="center", clip_on=False,
+                )
+
+        elif annotate == "start_right":
+            for y_val, start_t, model, color, label_y in _stagger(starts):
+                if model == "base": continue
+                if skip_below is not None and y_val < skip_below: continue
+                
+                ci = find_ci_record(
+                    gsm_cis.get(model, []),
+                    key,
+                    {"condition": "per_step", "t": int(start_t)},
+                )
+                
+                x_pts = [start_t, k + 0.15, k + 0.4, k + line_extend]
+                y_pts = [y_val, y_val, label_y, label_y]
+                ax.plot(x_pts, y_pts, color=color, ls=(0, (1.2, 1.8)), linewidth=0.65, alpha=0.75, zorder=0)
+                
+                ax.annotate(
+                    fmt_pm_pct(y_val, ci), xy=(k + line_extend, label_y), xytext=(3, 0),
+                    textcoords="offset points", fontsize=5.5, color=color, weight="bold",
+                    ha="left", va="center", clip_on=False,
+                )
 
         ax.set_xlabel("Thought step $t$")
         ax.set_ylabel(ylabel)
         ax.set_title(f"{panel_label} {title_str}", fontsize=8, pad=6)
         ax.set_ylim(*ylim)
-        ax.set_xlim(-0.2, k + 1.0) 
+        
+        left_pad = -0.2 
+        right_pad = 2.8 
+        ax.set_xlim(left_pad, k + right_pad)
         ax.set_xticks(steps)
 
-    _plot_line_panel(axes[0], "hit_rate", "Intermediate Hit Rate", (-2, 82), "Hit rate (%)", "(a)")
-    _plot_line_panel(axes[1], "superposition_rate", "Superposition Rate", (-1, 30), "Superposition (%)", "(b)")
-    _plot_line_panel(axes[2], "alignment_rate", "Step Alignment", (-2, 68), "Step alignment (%)", "(c)", skip_below=1.0)
+    _plot_line_panel(axes[0], "hit_rate", "Intermediate Hit Rate", (-2, 82), "Hit rate (%)", "(a)", annotate="endpoint_right")
+    _plot_line_panel(axes[1], "superposition_rate", "Superposition Rate", (-1, 30), "Superposition (%)", "(b)", annotate="endpoint_right")
+    _plot_line_panel(axes[2], "alignment_rate", "Step Alignment", (-2, 68),
+                     "Step alignment (%)", "(c)", skip_below=1.0,
+                     annotate="start_right")
 
     handles, labels = axes[0].get_legend_handles_labels()
-    # Moved legend down further
-    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.2), 
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.25), 
                ncol=6, fontsize=6, frameon=True, framealpha=0.8, edgecolor="#cccccc", 
                handlelength=2.0, columnspacing=1.2, handletextpad=0.5)
 
-    out_path = Path(out_dir) / "line_metrics.pdf"
+    out_path = Path(out_dir) / "intermediate_decodability.pdf"
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
 
 
 def plot_attention_bars(data_dir, out_dir, k=6):
     """Figure 2: 2-panel attention mass (Vertically stacked)."""
-    gsm_data = {m: load_json(data_dir, "gsm", m, k) for m in GSM_MODELS if load_json(data_dir, "gsm", m, k)}
-    prosqa_data = {m: load_json(data_dir, "prosqa", m, k) for m in PROSQA_MODELS if load_json(data_dir, "prosqa", m, k)}
+    gsm_data = {}
+    for m in GSM_MODELS:
+        d = load_json(data_dir, "gsm", m, k)
+        if d is not None:
+            gsm_data[m] = d
+    prosqa_data = {}
+    for m in PROSQA_MODELS:
+        d = load_json(data_dir, "prosqa", m, k)
+        if d is not None:
+            prosqa_data[m] = d
+    ci_by_task_model = {
+        ("gsm", m): load_ci_records(data_dir, "gsm", m, k)
+        for m in gsm_data
+    }
+    ci_by_task_model.update({
+        ("prosqa", m): load_ci_records(data_dir, "prosqa", m, k)
+        for m in prosqa_data
+    })
 
     # 2 rows, 1 column. Width adjusted to 3.25 (standard ICML single column)
     fig, axes = plt.subplots(2, 1, figsize=(3.25, 2.5), gridspec_kw={'hspace': 1.0})
 
-    def _plot_stacked_attn(ax, task_data, task_title, panel_label):
-        attn_models, prompt_vals, latent_vals, self_vals = [], [], [], []
+    def _plot_stacked_attn(ax, task, task_data, task_title, panel_label):
+        attn_models = []
+        prompt_vals, latent_vals, self_vals = [], [], []
+        prompt_cis, latent_cis, self_cis = [], [], []
         for model in GSM_MODELS:  
             if model not in task_data: continue
             am = task_data[model].get("attention_mass") or task_data[model].get("attention")
@@ -614,6 +833,11 @@ def plot_attention_bars(data_dir, out_dir, k=6):
                 prompt_vals.append(am.get("mean_prompt", 0) * 100)
                 latent_vals.append(am.get("mean_latent", 0) * 100)
                 self_vals.append(am.get("mean_self", 0) * 100)
+                records = ci_by_task_model.get((task, model), [])
+                ctx = {"condition": "end_token"}
+                prompt_cis.append(find_ci_record(records, "attn_prompt", ctx))
+                latent_cis.append(find_ci_record(records, "attn_latent", ctx))
+                self_cis.append(find_ci_record(records, "attn_self", ctx))
 
         x_bar = np.arange(len(attn_models))
         w = 0.6
@@ -623,9 +847,15 @@ def plot_attention_bars(data_dir, out_dir, k=6):
         ax.bar(x_bar, self_vals, width=w, bottom=bottoms, label="Self", color="#f28e2b", edgecolor="black", linewidth=0.3)
 
         for i in range(len(x_bar)):
-            if prompt_vals[i] > 4: ax.text(x_bar[i], prompt_vals[i] / 2, f"{prompt_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="white")
-            if latent_vals[i] > 4: ax.text(x_bar[i], prompt_vals[i] + latent_vals[i] / 2, f"{latent_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="white")
-            if self_vals[i] > 4: ax.text(x_bar[i], bottoms[i] + self_vals[i] / 2, f"{self_vals[i]:.1f}", ha="center", va="center", fontsize=4.5, color="black")
+            if prompt_vals[i] > 4:
+                ax.text(x_bar[i], prompt_vals[i] / 2, fmt_pm_pct(prompt_vals[i], prompt_cis[i]),
+                        ha="center", va="center", fontsize=3.8, color="white")
+            if latent_vals[i] > 4:
+                ax.text(x_bar[i], prompt_vals[i] + latent_vals[i] / 2, fmt_pm_pct(latent_vals[i], latent_cis[i]),
+                        ha="center", va="center", fontsize=3.8, color="white")
+            if self_vals[i] > 4:
+                ax.text(x_bar[i], bottoms[i] + self_vals[i] / 2, fmt_pm_pct(self_vals[i], self_cis[i]),
+                        ha="center", va="center", fontsize=3.8, color="black")
 
         ax.set_xticks(x_bar)
         ax.set_xticklabels([MODEL_LABELS[m] for m in attn_models])
@@ -638,12 +868,130 @@ def plot_attention_bars(data_dir, out_dir, k=6):
                   ncol=3, fontsize=5.5, frameon=False, handletextpad=0.4, columnspacing=1.2)
 
     # ProsQA on top, GSM on bottom
-    _plot_stacked_attn(axes[0], prosqa_data, "Graph-Hopping: Attention", "(a)")
-    _plot_stacked_attn(axes[1], gsm_data, "Arithmetic-Reasoning: Attention", "(b)")
+    _plot_stacked_attn(axes[0], "prosqa", prosqa_data, "Graph-Hopping: Attention", "(a)")
+    _plot_stacked_attn(axes[1], "gsm", gsm_data, "Arithmetic-Reasoning: Attention", "(b)")
 
     out_path = Path(out_dir) / "attention_bars.pdf"
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Appendix tables
+# ═══════════════════════════════════════════════════════════════════
+
+TASK_LABELS = {
+    "prosqa": "Graph-Hopping",
+    "gsm": "Arithmetic-Reasoning",
+}
+
+
+def _collect_available(data_dir, k=6):
+    data = {}
+    cis = {}
+    for task in ["prosqa", "gsm"]:
+        models = PROSQA_MODELS if task == "prosqa" else GSM_MODELS
+        data[task] = {}
+        cis[task] = {}
+        for model in models:
+            d = load_json(data_dir, task, model, k)
+            if d is None:
+                continue
+            data[task][model] = d
+            cis[task][model] = load_ci_records(data_dir, task, model, k)
+    return data, cis
+
+
+def build_appendix_tables(data_dir, k=6):
+    data, cis = _collect_available(data_dir, k)
+    lines = [
+        r"\subsection{Logit-Lens and Attention Analyses}",
+        r"\label{app:logit_lens_stats}",
+        "",
+        r"Point estimates and 95\% bootstrap CIs "
+        r"(10{,}000 percentile resamples) for the logit-lens and "
+        r"attention diagnostics. Attention mass is measured at the "
+        r"decoder-entry/end-latent token. GSM8k pooled metrics aggregate "
+        r"over all thought steps.",
+        "",
+    ]
+
+    # Attention mass table across both tasks.
+    lines += [
+        r"\begin{table}[h!]",
+        r"\centering",
+        r"\small",
+        r"\setlength{\tabcolsep}{4pt}",
+        r"\caption{Logit-lens attention-mass CIs.}",
+        r"\begin{tabular}{llcccc}",
+        r"\toprule",
+        r"Task & Model & Prompt [\% CI] & Latent [\% CI] & Self [\% CI] & $n$ \\",
+        r"\midrule",
+    ]
+    for task in ["prosqa", "gsm"]:
+        for model in (PROSQA_MODELS if task == "prosqa" else GSM_MODELS):
+            if model not in data[task]:
+                continue
+            am = data[task][model].get("attention_mass") or data[task][model].get("attention")
+            if am is None:
+                continue
+            records = cis[task].get(model, [])
+            ctx = {"condition": "end_token"}
+            prompt = find_ci_record(records, "attn_prompt", ctx)
+            latent = find_ci_record(records, "attn_latent", ctx)
+            self_attn = find_ci_record(records, "attn_self", ctx)
+            n_fallback = data[task][model].get("n") or data[task][model].get("n_instances")
+            n = fmt_n(prompt or latent or self_attn, n_fallback)
+            lines.append(
+                f"{TASK_LABELS[task]} & {MODEL_LABELS[model]} & "
+                f"{fmt_point_or_ci_pct(am.get('mean_prompt'), prompt)} & "
+                f"{fmt_point_or_ci_pct(am.get('mean_latent'), latent)} & "
+                f"{fmt_point_or_ci_pct(am.get('mean_self'), self_attn)} & {n} \\\\"
+            )
+    lines += [
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\label{tab:logit_lens_attention_stats}",
+        r"\end{table}",
+        "",
+    ]
+
+    if data.get("gsm"):
+        # GSM pooled table.
+        lines += [
+            r"\begin{table}[h!]",
+            r"\centering",
+            r"\small",
+            r"\setlength{\tabcolsep}{5pt}",
+            r"\caption{Arithmetic-Reasoning pooled logit-lens CIs.}",
+            r"\begin{tabular}{lccc}",
+            r"\toprule",
+            r"Model & Any intermediate hit [\% CI] & Superposition [\% CI] & $n$ \\",
+            r"\midrule",
+        ]
+        for model in GSM_MODELS:
+            if model not in data["gsm"]:
+                continue
+            records = cis["gsm"].get(model, [])
+            ctx = {"condition": "pooled"}
+            hit = find_ci_record(records, "overall_hit_rate", ctx)
+            sup = find_ci_record(records, "overall_superposition_rate", ctx)
+            n = fmt_n(hit or sup, data["gsm"][model].get("n_instances"))
+            overall = data["gsm"][model].get("overall", {})
+            lines.append(
+                f"{MODEL_LABELS[model]} & "
+                f"{fmt_point_or_ci_pct(overall.get('hit_rate'), hit)} & "
+                f"{fmt_point_or_ci_pct(overall.get('superposition_rate'), sup)} & {n} \\\\"
+            )
+        lines += [
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\label{tab:logit_lens_gsm_pooled_stats}",
+            r"\end{table}",
+            "",
+        ]
+
+    return "\n".join(lines).strip()
 
 # ═══════════════════════════════════════════════════════════════════
 # Main
@@ -655,6 +1003,8 @@ def main():
                         help="Path to outputs/logit_lens/ containing JSON files")
     parser.add_argument("--out_dir", type=str, default=None,
                         help="Output directory for PDFs (default: same as data_dir)")
+    parser.add_argument("--out_appendix", type=str, default="tables/tab_logit_lens_stats.tex",
+                        help="Output path for appendix LaTeX statistical tables")
     parser.add_argument("--k", type=int, default=6)
     args = parser.parse_args()
 
@@ -675,6 +1025,15 @@ def main():
     print("Figure 3: Logit-lens decoded token examples")
     print("=" * 60)
     plot_logit_lens_examples(args.data_dir, out_dir, args.k)
+
+    print("=" * 60)
+    print("Appendix: Logit-lens statistical tables")
+    print("=" * 60)
+    appendix_tex = build_appendix_tables(args.data_dir, args.k)
+    out_appendix = Path(args.out_appendix)
+    out_appendix.parent.mkdir(parents=True, exist_ok=True)
+    out_appendix.write_text(appendix_tex)
+    print(f"Saved: {out_appendix.resolve()}")
 
     # print("\n" + "=" * 60)
     # print("Figure 3: ProsQA attention distribution")

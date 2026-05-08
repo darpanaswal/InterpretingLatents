@@ -497,7 +497,7 @@ def _strip_arrays(metrics_dict):
 
 
 def _bootstrap_eval(metrics_dict, metric_prefix, cis_jsonl, context,
-                    metric_suffix=""):
+                    metric_suffix="", n_boot=1000):
     """
     Compute bootstrap CIs for r2_uniform and cosine from an evaluate() result.
     Appends records to cis_jsonl. Returns list of BootstrapResult for logging.
@@ -508,9 +508,10 @@ def _bootstrap_eval(metrics_dict, metric_prefix, cis_jsonl, context,
 
     # R² CI via row-resampling (Pattern B)
     if "_Y_true" in metrics_dict and "_Y_pred" in metrics_dict:
-        r2_ci = bootstrap_r2(
+        r2_ci = _bootstrap_r2_fast(
             metrics_dict["_Y_true"], metrics_dict["_Y_pred"],
             metric=f"{metric_prefix}_r2_uniform{metric_suffix}",
+            n_boot=n_boot,
         )
         save_record(cis_jsonl, r2_ci, context=context)
         cis.append(r2_ci)
@@ -520,11 +521,48 @@ def _bootstrap_eval(metrics_dict, metric_prefix, cis_jsonl, context,
         cos_ci = bootstrap_mean(
             metrics_dict["_per_pair_cosine"],
             metric=f"{metric_prefix}_cosine{metric_suffix}",
+            n_boot=n_boot,
         )
         save_record(cis_jsonl, cos_ci, context=context)
         cis.append(cos_ci)
 
     return cis
+
+def _r2_uniform_fast(Y, Yhat):
+    # SSE per output: shape [D]
+    diff = Y - Yhat
+    sse = (diff * diff).sum(axis=0)
+    # SST per output: centered Y squared, summed
+    Y_centered = Y - Y.mean(axis=0, keepdims=True)
+    sst = (Y_centered * Y_centered).sum(axis=0)
+    # Per-dim R^2 with sklearn's SST==0 convention
+    nonzero = sst > 0
+    r2_per = np.zeros_like(sst)
+    r2_per[nonzero] = 1.0 - sse[nonzero] / sst[nonzero]
+    return float(r2_per.mean())
+
+
+def _bootstrap_r2_fast(Y_true, Y_pred, n_boot=1000, ci=95.0,
+                       seed=0, metric="r2"):
+    # Pattern B with closed-form R^2 per draw.
+    Y = np.asarray(Y_true)
+    Yh = np.asarray(Y_pred)
+    assert Y.shape == Yh.shape, "shape mismatch"
+    n = Y.shape[0]
+    rng = np.random.default_rng(seed)
+
+    point = _r2_uniform_fast(Y, Yh)
+    boots = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        boots[b] = _r2_uniform_fast(Y[idx], Yh[idx])
+    lo, hi = np.percentile(boots, [(100 - ci) / 2, 100 - (100 - ci) / 2])
+    return BootstrapResult(
+        metric=metric, point=float(point),
+        ci_low=float(lo), ci_high=float(hi),
+        ci_level=ci, n=n, n_boot=n_boot, seed=seed,
+        method="function",
+    )
 
 
 def identity_prediction(thoughts_eval, order, drop_h0=True, skip_ts=None):
@@ -551,7 +589,7 @@ def identity_prediction(thoughts_eval, order, drop_h0=True, skip_ts=None):
 def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
         n_thoughts=6, batch_size=32, max_train_instances=None,
         num_gpus=1, seed=0, project_to_subspace=False, bases_path=None,
-        out_dir=None, mlp_seeds=None):
+        out_dir=None, mlp_seeds=None, n_boot=1000):
 
     if mlp_seeds is None:
         mlp_seeds = [0, 1, 2]
@@ -735,7 +773,7 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
 
         # Identity and linear_shared: deterministic, single CI as before
         for label, m_te in [("identity", m_id_te), ("linear_shared", m_lin_te)]:
-            cis = _bootstrap_eval(m_te, f"o{order}_{label}", cis_jsonl, ci_ctx)
+            cis = _bootstrap_eval(m_te, f"o{order}_{label}", cis_jsonl, ci_ctx, n_boot=n_boot)
             for c in cis:
                 print(f"    [CI] {c.metric}: {c.to_short_str()}")
 
@@ -743,7 +781,7 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
         seed0_cis = _bootstrap_eval(
             m_mlp_te_seed0, f"o{order}_mlp_shared",
             cis_jsonl, {**ci_ctx, "variant": "seed0"},
-            metric_suffix="_seed0",
+            metric_suffix="_seed0", n_boot=n_boot
         )
 
         # MLP: pooled CI (sampling ⊗ training)
@@ -754,7 +792,7 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
             {**ci_ctx, "variant": "pooled",
              "n_seeds": K_seeds, "seeds": list(mlp_seeds),
              "pooling": "concat"},
-            metric_suffix="_pooled",
+            metric_suffix="_pooled", n_boot=n_boot
         )
 
         # Print three-number summary per metric
@@ -856,6 +894,8 @@ def main():
         help="Override path to bases.npz. Default: "
              "BASE_DIR/outputs/gradient_geometry/<task>/<model>/bases.npz",
     )
+    parser.add_argument("--n_boot", type=int, default=1000,
+                    help="Number of bootstrap iterations.")
 
     parser.add_argument("--_worker_mode", action="store_true",
                         help=argparse.SUPPRESS)
@@ -911,6 +951,7 @@ def main():
                     bases_path=args.bases_path,
                     out_dir=out_dir,
                     mlp_seeds=args.mlp_seeds,
+                    n_boot=args.n_boot,
                 )
                 out_path = out_dir / f"results_{model}_{task}{suffix}.json"
                 with open(out_path, "w") as f:
