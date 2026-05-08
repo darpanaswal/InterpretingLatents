@@ -909,7 +909,7 @@ def build_appendix_tables(data_dir, k=6):
         r"\label{app:logit_lens_stats}",
         "",
         r"Point estimates and 95\% bootstrap CIs "
-        r"(10{,}000 percentile resamples) for the logit-lens and "
+        r"(1{,}000 percentile resamples) for the logit-lens and "
         r"attention diagnostics. Attention mass is measured at the "
         r"decoder-entry/end-latent token. GSM8k pooled metrics aggregate "
         r"over all thought steps.",
@@ -928,13 +928,27 @@ def build_appendix_tables(data_dir, k=6):
         r"Task & Model & Prompt [\% CI] & Latent [\% CI] & Self [\% CI] & $n$ \\",
         r"\midrule",
     ]
-    for task in ["prosqa", "gsm"]:
-        for model in (PROSQA_MODELS if task == "prosqa" else GSM_MODELS):
-            if model not in data[task]:
-                continue
+    
+    for t_idx, task in enumerate(["prosqa", "gsm"]):
+        models = PROSQA_MODELS if task == "prosqa" else GSM_MODELS
+        
+        # Pre-filter valid models to determine the multirow span
+        valid_models = []
+        for model in models:
+            if model in data[task]:
+                am = data[task][model].get("attention_mass") or data[task][model].get("attention")
+                if am is not None:
+                    valid_models.append(model)
+        
+        if not valid_models:
+            continue
+            
+        # Insert a midrule between different task blocks
+        if t_idx > 0:
+            lines.append(r"\midrule")
+            
+        for m_idx, model in enumerate(valid_models):
             am = data[task][model].get("attention_mass") or data[task][model].get("attention")
-            if am is None:
-                continue
             records = cis[task].get(model, [])
             ctx = {"condition": "end_token"}
             prompt = find_ci_record(records, "attn_prompt", ctx)
@@ -942,12 +956,20 @@ def build_appendix_tables(data_dir, k=6):
             self_attn = find_ci_record(records, "attn_self", ctx)
             n_fallback = data[task][model].get("n") or data[task][model].get("n_instances")
             n = fmt_n(prompt or latent or self_attn, n_fallback)
+            
+            # Apply multirow to the first row of the block, leave blank for others
+            if m_idx == 0:
+                task_col = rf"\multirow{{{len(valid_models)}}}{{*}}{{{TASK_LABELS[task]}}}"
+            else:
+                task_col = ""
+                
             lines.append(
-                f"{TASK_LABELS[task]} & {MODEL_LABELS[model]} & "
+                f"{task_col} & {MODEL_LABELS[model]} & "
                 f"{fmt_point_or_ci_pct(am.get('mean_prompt'), prompt)} & "
                 f"{fmt_point_or_ci_pct(am.get('mean_latent'), latent)} & "
                 f"{fmt_point_or_ci_pct(am.get('mean_self'), self_attn)} & {n} \\\\"
             )
+            
     lines += [
         r"\bottomrule",
         r"\end{tabular}",

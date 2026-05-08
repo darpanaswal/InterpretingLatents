@@ -128,62 +128,122 @@ def fmt_pct(val):
     # Rounds to the nearest integer and removes decimals
     return f"{round(val * 100)}"
 
-def generate_appendix_main_table(results, modes, all_k):
+def _fmt_with_ci(value, ci_record, pct=False, decimals=2):
+    """
+    Point estimate plus bootstrap half-width, in the same '$p {\\scriptstyle \\pm hw}$'
+    style used by remove_thoughts_tables.py. Falls back to point-only if no CI record.
+    """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "-"
+    scale = 100 if pct else 1
+    p = value * scale
+    if ci_record is None:
+        return f"${p:.{decimals}f}$"
+    hw = (ci_record["ci_high"] - ci_record["ci_low"]) * scale / 2
+    return rf"${p:.{decimals}f} {{\scriptstyle \pm {hw:.{decimals}f}}}$"
+
+
+def _bfs_header_block(modes, metric_specs):
+    """
+    Emit one header block (multicol row + cmidrules + per-model $k$ row)
+    covering the metrics in `metric_specs`. Each spec is (column_label,).
+    Returns a list of LaTeX lines.
+    """
     num_m = len(modes)
-    cols = "l " + " ".join(["c" * num_m] * 4)
-    
+    multicol = ["", *[
+        f"\\multicolumn{{{num_m}}}{{c}}{{{label}}}"
+        for (label,) in metric_specs
+    ]]
+    cmidrules = []
+    start = 2
+    for _ in metric_specs:
+        end = start + num_m - 1
+        cmidrules.append(f"\\cmidrule(lr){{{start}-{end}}}")
+        start = end + 1
+    headers = ["$k$"] + [_LABELS_SHORT[m] for m in modes] * len(metric_specs)
+    return [
+        " & ".join(multicol) + " \\\\",
+        " ".join(cmidrules),
+        " & ".join(headers) + " \\\\",
+        "\\midrule",
+    ]
+
+
+def _bfs_data_rows(results, modes, all_k, ci_data, blocks):
+    """
+    One row per k, with one cell per (metric, model). `blocks` is a list of
+    (summary_key, ci_metric_key, pct_flag, decimals) tuples.
+    """
+    rows = []
+    for k in all_k:
+        row = [str(k)]
+        for summary_key, ci_key, pct, decimals in blocks:
+            for m in modes:
+                v = results[m]["summary"].get(str(k), {}).get(summary_key, float("nan"))
+                rec = _find_ci_record(ci_data.get(m, []), ci_key, {"t": int(k)})
+                row.append(_fmt_with_ci(v, rec, pct=pct, decimals=decimals))
+        rows.append(" & ".join(row) + " \\\\")
+    return rows
+
+
+def generate_appendix_main_table(results, modes, all_k, ci_data=None):
+    """
+    Full standard-probing table over all (model, k), with bootstrap CIs.
+    Layout: a single table with two stacked halves (separated by \\midrule)
+    to halve the horizontal footprint:
+
+        Top half:    $H/\\log_2 N$, Top-1 correct (%)
+        Bottom half: $P(\\text{correct})$, Cand. mass
+
+    Each half repeats the per-model column headers and the $k$ index column.
+    Column count goes from 1 + 4M to 1 + 2M (M = number of models).
+    """
+    ci_data = ci_data or {}
+    num_m = len(modes)
+    cols = "l " + " ".join(["c" * num_m] * 2)
+
+    # (summary_key, ci_metric_key, pct_flag, decimals)
+    top_blocks = [
+        ("mean_normalized_entropy", "normalized_entropy", False, 2),
+        ("top1_correct_frac",       "top1_is_correct",    True,  1),
+    ]
+    bot_blocks = [
+        ("mean_value_correct",  "value_correct",  False, 2),
+        ("mean_candidate_mass", "candidate_mass", False, 2),
+    ]
+    top_specs = [(r"$H/\log_2 N$",), (r"Top-1 correct (\%)",)]
+    bot_specs = [(r"$P(\text{correct})$",), (r"Cand.\ mass",)]
+
     latex = [
         "\\begin{table*}[!t]",
         "\\centering",
         "\\tiny",
         "\\setlength{\\tabcolsep}{3pt}",
-        "\\caption{Appendix standard-probing table. $P(\\text{correct})$ is the raw (unnormalized) joint probability summed over correct candidates. Candidate mass is the total raw probability assigned to all candidates at the depth frontier. Point estimates are accompanied by bootstrap confidence intervals in the corresponding CI records emitted by the probing run. Values $<0.01$ for PaT and C at $k{=}0{-}2$ reflect that these models were trained to reason through latent recurrence and assign near-zero probability to any concept before the recurrence has begun.}",
+        "\\caption{Full standard-probing results across timesteps and models. "
+        "Each cell is the per-timestep mean with its 95\\% bootstrap half-width "
+        "(10{,}000 percentile resamples). The table is split into two stacked "
+        "halves to fit the page width: the top half reports normalized entropy "
+        "and Top-1 correctness; the bottom half reports $P(\\text{correct})$ "
+        "(the raw, unnormalized joint probability summed over correct candidates) "
+        "and candidate mass (total raw probability assigned to all candidates at "
+        "the depth frontier). Values $<0.01$ for PaT and C at $k{=}0{-}2$ reflect "
+        "that these models were trained to reason through latent recurrence and "
+        "assign near-zero probability to any concept before the recurrence has begun.}",
         f"\\begin{{tabular}}{{{cols}}}",
         "\\toprule",
-        "& \\multicolumn{" + str(num_m) + "}{c}{$H/\\log_2 N$} & \\multicolumn{" + str(num_m) + "}{c}{Top-1 correct (\\%)} & \\multicolumn{" + str(num_m) + "}{c}{$P(\\text{correct})$} & \\multicolumn{" + str(num_m) + "}{c}{Cand.\\ mass} \\\\"
     ]
-    
-    cmidrules = []
-    start = 2
-    for _ in range(4):
-        end = start + num_m - 1
-        cmidrules.append(f"\\cmidrule(lr){{{start}-{end}}}")
-        start = end + 1
-    latex.append(" ".join(cmidrules))
-    
-    headers = ["$k$"] + [_LABELS_SHORT[m] for m in modes] * 4
-    latex.append(" & ".join(headers) + " \\\\")
-    latex.append("\\midrule")
-    
-    for k in all_k:
-        row = [str(k)]
-        
-        for m in modes:
-            v = results[m]["summary"].get(str(k), {}).get("mean_normalized_entropy", float("nan"))
-            row.append(fmt_float(v, 2))
-            
-        for m in modes:
-            v = results[m]["summary"].get(str(k), {}).get("top1_correct_frac", float("nan"))
-            row.append(fmt_pct(v))
-            
-        for m in modes:
-            v = results[m]["summary"].get(str(k), {}).get("mean_value_correct", float("nan"))
-            row.append(fmt_float(v, 2))
-            
-        for m in modes:
-            v = results[m]["summary"].get(str(k), {}).get("mean_candidate_mass", float("nan"))
-            row.append(fmt_float(v, 2))
-            
-        latex.append(" & ".join(row) + " \\\\")
-        latex.append("")
-
-    latex.extend([
+    latex += _bfs_header_block(modes, top_specs)
+    latex += _bfs_data_rows(results, modes, all_k, ci_data, top_blocks)
+    latex += ["\\midrule"]
+    latex += _bfs_header_block(modes, bot_specs)
+    latex += _bfs_data_rows(results, modes, all_k, ci_data, bot_blocks)
+    latex += [
         "\\bottomrule",
         "\\end{tabular}",
         "\\label{tab:appendix_bfs_probing}",
         "\\end{table*}",
-        ""
-    ])
+        "",
+    ]
     return "\n".join(latex)
 
 def _metric_ylim(results, modes, all_k, summary_key, pct):
@@ -321,7 +381,7 @@ def plot_superposition_metrics(results, modes, all_k, results_dir):
     plt.close(fig)
     print(f"Saved Superposition Figure to: {out_path}")
 
-def generate_table9(results, modes, all_k):
+def generate_table_candidate_parallelism(results, modes, all_k):
     num_m = len(modes)
     cols = "l " + " ".join(["ccc"] * num_m)
     
@@ -372,7 +432,7 @@ def generate_table9(results, modes, all_k):
     ])
     return "\n".join(latex)
 
-def generate_table10(results, modes):
+def generate_table_convergence_trajectories(results, modes):
     latex = [
         "\\begin{table}[h!]",
         "\\centering",
@@ -413,7 +473,7 @@ def generate_table10(results, modes):
     ])
     return "\n".join(latex)
 
-def generate_table11(results, modes):
+def generate_table_per_instance_statistics(results, modes):
     num_m = len(modes)
     cols = "l " + "c"*num_m
     
@@ -476,47 +536,88 @@ def generate_table11(results, modes):
     ])
     return "\n".join(latex)
 
+def generate_stats_subsection(results, modes, all_k, ci_data):
+    """
+    Statistical-tests subsection: full standard-probing table with per-timestep
+    bootstrap 95% CIs. Self-contained \\subsection-wrapped tex file.
+    """
+    lines = [
+        r"\subsection{Superposition Probing (Experiment~2): Statistical Tests}",
+        r"\label{app:superposition_stats}",
+        "",
+        r"Per-timestep point estimates and 95\% bootstrap CIs "
+        r"(10{,}000 percentile resamples) for the four headline standard-probing "
+        r"metrics: normalized entropy $H/\log_2 N$, top-1 correctness, raw "
+        r"probability mass on correct candidates $P(\text{correct})$, and total "
+        r"candidate mass. Half-widths are reported alongside each point estimate; "
+        r"non-overlap of CIs across models at a given $k$ indicates a reliable "
+        r"between-condition difference.",
+        "",
+        generate_appendix_main_table(results, modes, all_k, ci_data=ci_data),
+    ]
+    return "\n".join(lines).strip() + "\n"
+
+
+def generate_extended_subsection(results, modes, all_k):
+    """
+    Extended-analysis subsection: qualitative / structural patterns
+    (candidate parallelism, convergence trajectories, per-instance dynamics).
+    Self-contained \\subsection-wrapped tex file.
+    """
+    lines = [
+        r"\subsection{Superposition Probing (Experiment~2): Extended Analysis}",
+        r"\label{app:superposition_extended}",
+        "",
+        r"Three complementary views of the probing signal beyond per-timestep "
+        r"point estimates. Table~\ref{tab:candidate_parallelism} reports cumulative "
+        r"top-$k$ raw probabilities (T1, T3, $\Delta = $ T3 $-$ T1) to quantify how "
+        r"much mass each model spreads across competing candidates. "
+        r"Table~\ref{tab:convergence_trajectories} contrasts $k{=}0$ and $k{=}4$ to "
+        r"summarize whether each model converges (rising $P(\text{correct})$ with "
+        r"falling entropy) or fails to. Table~\ref{tab:per_instance_statistics} "
+        r"breaks the same patterns down per instance, isolating the fraction of "
+        r"problems on which each behavior actually occurs.",
+        "",
+        generate_table_candidate_parallelism(results, modes, all_k),
+        "",
+        generate_table_convergence_trajectories(results, modes),
+        "",
+        generate_table_per_instance_statistics(results, modes),
+    ]
+    return "\n".join(lines).strip() + "\n"
+
+
 def run_analysis(task):
     all_results, results_dir = _load_all_results(task)
     if not all_results:
         print(f"No results found in {results_dir}")
         return
-        
+
     available = [m for m in _MODES_ORDER if m in all_results]
     all_k = sorted({
         int(k) for mode in available for k in all_results[mode]["summary"]
     })
-    
-    # Save appendix version of the former main table.
-    main_latex = generate_appendix_main_table(all_results, available, all_k)
-    main_path = "tables/table_appendix_bfs_probing.tex"
-    with open(main_path, "w") as f:
-        f.write(main_latex)
-    print(f"Saved Appendix Standard-Probing Table to: {main_path}")
 
-    # Save replacement main-text figure.
+    # CI records (loaded once; reused by main table and figure).
+    ci_data = _load_ci_records(results_dir, available)
+
+    # Replacement main-text figure.
     plot_superposition_metrics(all_results, available, all_k, results_dir)
-    
-    # Save Table 9
-    t9_latex = generate_table9(all_results, available, all_k)
-    t9_path = results_dir / "table_9.tex"
-    with open(t9_path, "w") as f:
-        f.write(t9_latex)
-    print(f"Saved Table 9 to: {t9_path}")
-    
-    # Save Table 10
-    t10_latex = generate_table10(all_results, available)
-    t10_path = results_dir / "table_10.tex"
-    with open(t10_path, "w") as f:
-        f.write(t10_latex)
-    print(f"Saved Table 10 to: {t10_path}")
-    
-    # Save Table 11
-    t11_latex = generate_table11(all_results, available)
-    t11_path = results_dir / "table_11.tex"
-    with open(t11_path, "w") as f:
-        f.write(t11_latex)
-    print(f"Saved Table 11 to: {t11_path}")
+
+    # Two subsection-wrapped appendix files, mirroring remove_thoughts_tables.py.
+    subsections = [
+        ("tab_superposition_stats.tex",
+         generate_stats_subsection(all_results, available, all_k, ci_data),
+         "Statistical-Tests Subsection"),
+        ("tab_superposition_extended.tex",
+         generate_extended_subsection(all_results, available, all_k),
+         "Extended-Analysis Subsection"),
+    ]
+    for fname, tex, label in subsections:
+        out = f"tables/{fname}"
+        with open(out, "w") as f:
+            f.write(tex)
+        print(f"Saved {label} to: {out}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

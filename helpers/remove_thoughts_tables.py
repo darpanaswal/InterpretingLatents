@@ -29,7 +29,7 @@ Usage
 import json
 import argparse
 from pathlib import Path
-from src.config import THOUGHTS
+from src.config import THOUGHT_ABLATION
 
 
 # ── canonical column order ───────────────────────────────────────────────────
@@ -328,7 +328,7 @@ def build_appendix_table(data: dict) -> str:
         r"\label{app:ablation_stats}",
         "",
         r"Point estimates and 95\% bootstrap CIs "
-        r"(10{,}000 percentile resamples) "
+        r"(1{,}000 percentile resamples) "
         r"for accuracy with thoughts ($K{=}K_{\max}$) "
         r"and without ($K{=}0$). "
         r"$\Delta = \text{Acc}_{K_{\max}} - \text{Acc}_{K{=}0}$ "
@@ -337,25 +337,27 @@ def build_appendix_table(data: dict) -> str:
         r"($b$: correct only with thoughts; "
         r"$c$: correct only without).",
         "",
+        r"\begin{table}[h!]",
+        r"\centering",
+        r"\small",
+        r"\setlength{\tabcolsep}{4pt}",
+        r"\caption{Thought-token ablation statistical tests across tasks.}",
+        r"\begin{tabular}{l ccc cc}",
+        r"\toprule",
+        (
+            r"Model & Acc$_{K_{\max}}$ [\% CI] "
+            r"& Acc$_{K{=}0}$ [\% CI] "
+            r"& $\Delta$ [\% CI] "
+            r"& McNemar $p$ & $n$ \\"
+        ),
     ]
 
     for task, task_label in TASKS:
-
+        
+        # Add a midrule and a centered sub-header for the task
         lines += [
-            r"\begin{table}[h!]",
-            r"\centering",
-            r"\small",
-            r"\setlength{\tabcolsep}{4pt}",
-            r"\caption{Thought-token ablation statistical tests: "
-            + task_label + r".}",
-            r"\begin{tabular}{l ccc cc}",
-            r"\toprule",
-            (
-                r"Model & Acc$_{K_{\max}}$ [\% CI] "
-                r"& Acc$_{K{=}0}$ [\% CI] "
-                r"& $\Delta$ [\% CI] "
-                r"& McNemar $p$ & $n$ \\"
-            ),
+            r"\midrule",
+            rf"\multicolumn{{6}}{{c}}{{\textbf{{{task_label}}}}} \\",
             r"\midrule",
         ]
 
@@ -381,20 +383,18 @@ def build_appendix_table(data: dict) -> str:
                 f"{entry['n'] or '--'} \\\\"
             )
 
-        lines += [
-            r"\bottomrule",
-            r"\end{tabular}",
-            r"\label{tab:ablation_stats_" + task + r"}",
-            r"\end{table}",
-            "",
-        ]
-
-    lines.append(
+    # Close the table after all tasks are processed
+    lines += [
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\label{tab:ablation_stats_combined}",
+        r"\end{table}",
+        "",
         r"\noindent$^{*}p{<}0.05$,\quad "
         r"$^{**}p{<}0.01$,\quad "
         r"$^{***}p{<}0.001$ "
         r"(exact two-sided McNemar)."
-    )
+    ]
 
     return "\n".join(lines).strip()
 
@@ -423,7 +423,7 @@ def main():
 
     args = ap.parse_args()
 
-    data = collect(THOUGHTS, debug=args.debug)
+    data = collect(THOUGHT_ABLATION, debug=args.debug)
 
     if args.debug:
 

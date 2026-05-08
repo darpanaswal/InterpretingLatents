@@ -31,7 +31,7 @@ Usage:
 import json
 import torch
 import argparse
-from src.config import PROSQA_TEST, GSM_TEST, THOUGHTS
+from src.config import PROSQA_TEST, GSM_TEST, THOUGHT_ABLATION
 from src.utils import (
     setup_model_and_tokenizer,
     setup_codi_model,
@@ -584,7 +584,7 @@ def main():
 
     # Set data path
     data_path = args.data_path or str(PROSQA_TEST if args.task == "prosqa" else GSM_TEST)
-    output_base = THOUGHTS / args.task
+    output_base = THOUGHT_ABLATION / args.task
     output_base.mkdir(parents=True, exist_ok=True)
 
     data = load_data(data_path, args.max_instances)
