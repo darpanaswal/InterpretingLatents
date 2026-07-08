@@ -85,7 +85,8 @@ import argparse
 import numpy as np
 from pathlib import Path
 import torch.multiprocessing as mp
-from src.config import BASE_DIR, THOUGHTS
+import queue
+from src.config import BASE_DIR
 from src.bootstrap_stats import (
     bootstrap_mean,
     paired_bootstrap_diff,
@@ -107,6 +108,9 @@ from src.utils import (
     _merge_shards,
 )
 
+import warnings, transformers
+warnings.filterwarnings("ignore")
+transformers.logging.set_verbosity_error()
 
 # ═══════════════════════════════════════════════════════════════════
 # Building projectors from gradient bases
@@ -270,18 +274,29 @@ def run_amplification_sweep(
     n_total = len(instance_indices)
     flipped_indices = {alpha: [] for alpha in alphas}
 
-    for count, idx in enumerate(instance_indices):
-        if count % 100 == 0:
-            print(f"    [{label_name}] {count}/{n_total}")
+    # Build the per-alpha intervention closures ONCE, not per instance.
+    # make_amplification_intervention materializes the projector C as a
+    # (D, D) float32 device tensor for every timestep; for llama (D=2048)
+    # that is ~T*16MB of host->device transfer + allocation. Rebuilding it
+    # inside the instance loop did this n_total times redundantly per alpha
+    # (e.g. 125x), dwarfing the actual forward passes.
+    interventions = {
+        alpha: make_amplification_intervention(
+            concept_projectors, alpha, ctx["device"],
+        )
+        for alpha in alphas
+    }
 
-        sample = data[idx]
-        base_norm = normalize_text_for_flip(baseline_texts[idx])
-
-        for alpha in alphas:
-            intervention_fn = make_amplification_intervention(
-                concept_projectors, alpha, ctx["device"],
-            )
-            r = _run_intervened(ctx, sample, intervention_fn)
+    # Iterate alpha-outer so progress is per-alpha and interpretable:
+    # each alpha is one full pass over the shard.
+    for alpha in alphas:
+        for count, idx in enumerate(instance_indices):
+            if count % 25 == 0:
+                print(f"    [{label_name}] alpha={alpha} {count}/{n_total}",
+                      flush=True)
+            sample = data[idx]
+            base_norm = normalize_text_for_flip(baseline_texts[idx])
+            r = _run_intervened(ctx, sample, interventions[alpha])
             text = r.get("text", r.get("predicted", ""))
             if normalize_text_for_flip(text) != base_norm:
                 flipped_indices[alpha].append(idx)
@@ -296,7 +311,8 @@ def run_amplification_sweep(
             "flipped_indices": flipped_indices[alpha],
         }
         print(f"    [{label_name}] Alpha {alpha}: "
-              f"{n_flipped}/{n_total} flipped ({results[alpha]['flip_rate']:.1%})")
+              f"{n_flipped}/{n_total} flipped ({results[alpha]['flip_rate']:.1%})",
+              flush=True)
     return results
 
 
@@ -324,7 +340,7 @@ def _amplification_worker(
     rank, world_size, task, model_name, n_thoughts,
     data, alphas, baseline_texts,
     concept_projectors_grad_np, concept_projectors_rand_np,
-    return_queue,
+    return_queue, family="gpt2", run_grad=True,
 ):
     """
     Per-GPU worker for the amplification sweep. Loads its own model on
@@ -336,7 +352,7 @@ def _amplification_worker(
 
     is_codi = (model_name == "codi")
     if is_codi:
-        codi_dict = setup_codi_model(task, device)
+        codi_dict = setup_codi_model(task, device, family=family)
         ctx = {
             "is_codi": True, "codi_dict": codi_dict,
             "coconut_model": None, "base_model": None, "tokenizer": None,
@@ -346,7 +362,7 @@ def _amplification_worker(
     else:
         codi_dict = None
         coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
-            setup_model_and_tokenizer(task, model_name, device)
+            setup_model_and_tokenizer(task, model_name, device, family=family)
         ctx = {
             "is_codi": False, "codi_dict": None,
             "coconut_model": coconut_model, "base_model": base_model,
@@ -356,13 +372,15 @@ def _amplification_worker(
         }
 
     indices = _shard_indices(len(data), world_size, rank)
-    print(f"[rank {rank}] processing {len(indices)} instances on {device}")
+    print(f"[rank {rank}] processing {len(indices)} instances on {device}", flush=True)
 
-    grad_part = run_amplification_sweep(
-        ctx, data, concept_projectors_grad_np, alphas,
-        baseline_texts, label_name=f"GRAD r{rank}",
-        instance_indices=indices,
-    )
+    grad_part = None
+    if run_grad:
+        grad_part = run_amplification_sweep(
+            ctx, data, concept_projectors_grad_np, alphas,
+            baseline_texts, label_name=f"GRAD r{rank}",
+            instance_indices=indices,
+        )
     rand_part = run_amplification_sweep(
         ctx, data, concept_projectors_rand_np, alphas,
         baseline_texts, label_name=f"Rand r{rank}",
@@ -374,6 +392,7 @@ def _amplification_worker(
 def run_amplification_multigpu(
     task, model_name, n_thoughts, data, alphas, baseline_texts,
     concept_projectors_grad, concept_projectors_rand, n_gpus,
+    family="gpt2", run_grad=True,
 ):
     """Spawn n_gpus workers for the amplification sweep."""
     ctx = mp.get_context("spawn")
@@ -384,20 +403,35 @@ def run_amplification_multigpu(
             target=_amplification_worker,
             args=(rank, n_gpus, task, model_name, n_thoughts,
                   data, alphas, baseline_texts,
-                  concept_projectors_grad, concept_projectors_rand, q),
+                  concept_projectors_grad, concept_projectors_rand, q,
+                  family, run_grad),
         )
         p.start()
         procs.append(p)
 
     shards = []
     for _ in range(n_gpus):
-        shards.append(q.get())
+        while True:
+            try:
+                res = q.get(timeout=5.0)
+                shards.append(res)
+                break
+            except queue.Empty:
+                for p in procs:
+                    if not p.is_alive() and p.exitcode != 0:
+                        raise RuntimeError(
+                            f"Worker process {p.pid} crashed with exit code {p.exitcode}. "
+                            "Check console for CUDA Out-Of-Memory or other runtime errors."
+                        )
+
     for p in procs:
         p.join()
 
     shards.sort(key=lambda s: s["rank"])
-    grad_merged = _merge_shards(
-        [s["grad"] for s in shards], alphas, len(data))
+    grad_merged = (
+        _merge_shards([s["grad"] for s in shards], alphas, len(data))
+        if run_grad else None
+    )
     rand_merged = _merge_shards(
         [s["rand"] for s in shards], alphas, len(data))
     return grad_merged, rand_merged
@@ -440,6 +474,10 @@ def main():
     parser.add_argument("--model",
                         choices=["coconut", "coconut_u", "pause", "codi"],
                         default="coconut")
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
+        help="Base model family. Determines checkpoint paths and dtype.",
+    )
     parser.add_argument("--n_thoughts", type=int, default=6)
     parser.add_argument("--max_instances", type=int, default=None)
     parser.add_argument("--n_boot", type=int, default=1000,
@@ -465,6 +503,11 @@ def main():
                         help="Number of independent random subspace draws. "
                              "Each uses seed+k for k=0..K-1. Default 3. "
                              "Use 1 to reproduce old single-seed behavior.")
+    parser.add_argument("--force_ablation", action="store_true",
+                        help="Re-run baseline + ablation even if "
+                             "ablation_results.json and baseline_texts.json "
+                             "already exist. Default: skip to amplification "
+                             "when both are present.")
     args = parser.parse_args()
 
     if args.n_random_seeds < 1:
@@ -475,38 +518,45 @@ def main():
 
     # ── Output dir ─────────────────────────────────────────────────
     output_dir = (Path(args.output_dir) if args.output_dir else
-                  BASE_DIR / "outputs" / "grad_subspace" / args.task / args.model)
+                  BASE_DIR / "outputs" / "grad_subspace"
+                  / args.model_family / args.task / args.model)
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[INFO] Task: {args.task}  Model: {args.model}")
+    print(f"[INFO] Task: {args.task}  Model: {args.model}  "
+          f"Family: {args.model_family}")
     print(f"[INFO] Output dir: {output_dir}")
 
-    # ── Load data + thoughts cache (for regime diagnostic) ──────────
+    # ── Load data ──────────────────────────────────────────────────
     data = load_data(args.task, args.max_instances)
     print(f"[INFO] Instances: {len(data)}")
-
-    thoughts_path = THOUGHTS / args.task / f"thoughts_{args.model}.pt"
-    thoughts = torch.load(thoughts_path, map_location="cpu",
-                          weights_only=False)["thoughts"]
-    D = thoughts.shape[2]
-    T = thoughts.shape[1]
 
     # ── Load gradient bases ────────────────────────────────────────
     bases_path = (Path(args.bases_path) if args.bases_path else
                   BASE_DIR / "outputs" / "gradient_geometry"
-                  / args.task / args.model / "bases.npz")
+                  / args.model_family / args.task / args.model / "bases.npz")
     if not bases_path.exists():
         raise FileNotFoundError(
             f"bases.npz not found at {bases_path}.\n"
-            f"Run gradient_subspace.py for {args.task}/{args.model} first."
+            f"Run gradient_subspace.py for {args.task}/{args.model} "
+            f"(family={args.model_family}) first."
         )
     bases = load_bases(bases_path)
     print(f"[INFO] Loaded bases from {bases_path}")
+
+    # D and T come straight from the bases. Every B_t has shape (D, k_t)
+    # and there is one entry per timestep, so T = len(bases) and
+    # D = first basis's row count. Thoughts cache is no longer required
+    # for this script — the bases are self-describing.
+    if not bases:
+        raise RuntimeError(f"No B_t* entries found in {bases_path}")
+    T = len(bases)
+    D = next(iter(bases.values())).shape[0]
+    print(f"[INFO] D={D}  T={T}  (derived from bases.npz)")
 
     for t, B_t in bases.items():
         if B_t.shape[0] != D:
             raise ValueError(
                 f"Basis dim mismatch at t={t}: B_t has D={B_t.shape[0]} "
-                f"but thoughts have D={D}."
+                f"but expected D={D}."
             )
 
     # Build projectors (gradient + matched-rank random control).
@@ -519,13 +569,15 @@ def main():
 
     # ── Load model ─────────────────────────────────────────────────
     if is_codi:
-        codi_dict = setup_codi_model(args.task, args.device)
+        codi_dict = setup_codi_model(args.task, args.device,
+                                     family=args.model_family)
         coconut_model = base_model = tokenizer = None
         latent_id = start_id = end_id = None
     else:
         codi_dict = None
         coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
-            setup_model_and_tokenizer(args.task, args.model, args.device)
+            setup_model_and_tokenizer(args.task, args.model, args.device,
+                                      family=args.model_family)
 
     # Build the ctx dict for dispatch.
     ctx = {
@@ -544,7 +596,24 @@ def main():
 
     # CI output path (JSONL, one record per metric).
     cis_jsonl = str(output_dir / "bootstrap_cis.jsonl")
-    ci_ctx = {"task": args.task, "model": args.model}
+    ci_ctx = {"task": args.task, "model": args.model,
+              "model_family": args.model_family}
+
+    # ── Resume detection ────────────────────────────────────────────
+    # Part 1 (baseline + ablation) is expensive and deterministic given
+    # the bases. If a previous run already wrote ablation_results.json AND
+    # baseline_texts.json, we can skip straight to amplification (Part 2),
+    # which depends on Part 1 only through baseline_texts (+ subspace_grad/
+    # ranks, both built above and independent of the ablation run).
+    abl_path = output_dir / "ablation_results.json"
+    baseline_texts_path = output_dir / "baseline_texts.json"
+    resume_amp = (
+        not args.force_ablation
+        and abl_path.exists()
+        and baseline_texts_path.exists()
+    )
+
+    N = len(data)  # used by both Part 1 and Part 2 (amplification)
 
     # ── Helper: run eval loop, return per-instance correctness vector ─
     def _eval_correctness(intervention_fn, label):
@@ -560,201 +629,248 @@ def main():
               f" = {acc:.1%}")
         return correct_vec
 
-    # ── Baseline ───────────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("BASELINE")
-    print("=" * 60)
-    identity_fn = lambda h, t: h
-    baseline_texts = []
-    baseline_correct = []
-    for idx, sample in enumerate(data):
-        if idx % 100 == 0:
-            print(f"    [Baseline] {idx}/{len(data)}")
-        r = _run_intervened(ctx, sample, identity_fn)
-        baseline_texts.append(r.get("text", r.get("predicted", "")))
-        baseline_correct.append(int(r["is_correct"]))
-    baseline_acc = sum(baseline_correct) / max(len(data), 1)
+    if not resume_amp:
+        # ── Baseline ───────────────────────────────────────────────────
+        print("\n" + "=" * 60)
+        print("BASELINE")
+        print("=" * 60)
+        identity_fn = lambda h, t: h
+        baseline_texts = []
+        baseline_correct = []
+        for idx, sample in enumerate(data):
+            if idx % 100 == 0:
+                print(f"    [Baseline] {idx}/{len(data)}")
+            r = _run_intervened(ctx, sample, identity_fn)
+            baseline_texts.append(r.get("text", r.get("predicted", "")))
+            baseline_correct.append(int(r["is_correct"]))
+        baseline_acc = sum(baseline_correct) / max(len(data), 1)
 
-    baseline_ci = report_mean_with_ci(
-        baseline_correct, metric="baseline_accuracy",
-        context={**ci_ctx, "condition": "baseline"},
-        cis_jsonl=cis_jsonl,
-        n_boot=args.n_boot,
-    )
-
-    # ════════════════════════════════════════════════════════════════
-    # PART 1: ABLATION — h <- (I - B_t B_t^T) h
-    # ════════════════════════════════════════════════════════════════
-    print("\n" + "=" * 60)
-    print("GRADIENT-SUBSPACE ABLATION")
-    print("=" * 60)
-
-    # ── Gradient ablation (deterministic, single run) ─────────────
-    grad_fn = make_projection_intervention(nullspace_grad, args.device)
-    print("  Running gradient-nullspace ablation...")
-    grad_correct = _eval_correctness(grad_fn, "GRAD")
-    grad_acc = sum(grad_correct) / max(len(data), 1)
-
-    grad_ci = report_mean_with_ci(
-        grad_correct, metric="grad_ablation_accuracy",
-        context={**ci_ctx, "condition": "grad_nullspace"},
-        cis_jsonl=cis_jsonl,
-        n_boot=args.n_boot,
-    )
-
-    # ── Random ablation: K independent seeds ─────────────────────
-    #
-    # For each seed s_k = args.seed + k:
-    #   1. Build random subspace projectors (rank-matched to gradient)
-    #   2. Run ablation eval → per-instance correctness vector (length N)
-    #   3. Save per-seed CI record
-    #   4. Accumulate into pooled vector, then discard per-seed outputs
-    #
-    # rand_correct_pooled = concat of K correctness vectors (length K*N)
-    # rand_correct_per_seed_accs[k] = mean accuracy for seed k
-
-    N = len(data)
-    rand_correct_pooled = []       # will be length K*N
-    rand_correct_per_seed_accs = []
-
-    for k in range(K):
-        s_k = args.seed + k
-        print(f"\n  Running rand-nullspace control (seed {s_k}, "
-              f"{k+1}/{K})...")
-
-        nullspace_rand_k, subspace_rand_k = build_random_subspace_projectors(
-            ranks, D, seed=s_k,
+        baseline_ci = report_mean_with_ci(
+            baseline_correct, metric="baseline_accuracy",
+            context={**ci_ctx, "condition": "baseline"},
+            cis_jsonl=cis_jsonl,
+            n_boot=args.n_boot,
         )
-        rand_fn_k = make_projection_intervention(nullspace_rand_k, args.device)
-        rand_correct_k = _eval_correctness(rand_fn_k, f"Rand s{s_k}")
 
-        # Per-seed CI record
-        seed_acc = sum(rand_correct_k) / max(N, 1)
-        rand_correct_per_seed_accs.append(seed_acc)
-        # seed_ci = report_mean_with_ci(
-        #     rand_correct_k, metric="rand_ablation_accuracy",
-        #     context={**ci_ctx, "condition": "rand_nullspace",
-        #              "seed": s_k, "seed_index": k,
-        #              "n_random_seeds": K},
-        #     cis_jsonl=cis_jsonl,
-        #     n_boot=args.n_boot,
-        # )
+        # Persist baseline texts so a later amplification-only resume can
+        # reload them without re-running the (single-GPU) baseline pass.
+        # Amplification's only per-instance dependency on Part 1 is these texts
+        # (flip = baseline_text != intervened_text); subspace_grad/ranks are
+        # built before Part 1 and are independent of the ablation run.
+        with open(baseline_texts_path, "w") as f:
+            json.dump({"baseline_texts": baseline_texts,
+                       "baseline_accuracy": baseline_acc}, f)
 
-        # Accumulate into pooled vector, then free per-seed data
-        rand_correct_pooled.extend(rand_correct_k)
-        del nullspace_rand_k, subspace_rand_k, rand_correct_k
+        # ════════════════════════════════════════════════════════════════
+        # PART 1: ABLATION — h <- (I - B_t B_t^T) h
+        # ════════════════════════════════════════════════════════════════
+        print("\n" + "=" * 60)
+        print("GRADIENT-SUBSPACE ABLATION")
+        print("=" * 60)
 
-    rand_correct_per_seed_accs = np.array(rand_correct_per_seed_accs)
-    rand_correct_pooled = np.array(rand_correct_pooled, dtype=np.float64)
+        # ── Gradient ablation (deterministic, single run) ─────────────
+        grad_fn = make_projection_intervention(nullspace_grad, args.device)
+        print("  Running gradient-nullspace ablation...")
+        grad_correct = _eval_correctness(grad_fn, "GRAD")
+        grad_acc = sum(grad_correct) / max(len(data), 1)
 
-    # (ii) Cross-seed summary record:
-    #   point = mean of per-seed accuracies
-    #   extra.seed_std = std of per-seed accuracies
-    seed_mean_rec = BootstrapResult(
-        metric="rand_ablation_accuracy_seed_mean",
-        point=float(rand_correct_per_seed_accs.mean()),
-        ci_low=float("nan"), ci_high=float("nan"),
-        ci_level=95.0, n=K, n_boot=0, seed=args.seed,
-        method="seed_summary",
-        extra={"seed_std": float(rand_correct_per_seed_accs.std()),
-               "n_random_seeds": K,
-               "per_seed_accs": rand_correct_per_seed_accs.tolist()},
-    )
-    save_record(cis_jsonl, seed_mean_rec,
-                context={**ci_ctx, "condition": "rand_nullspace_seed_summary"})
-    print(f"  [CI] rand_ablation seed_mean: "
-          f"{seed_mean_rec.point:.3f} ± {seed_mean_rec.extra['seed_std']:.4f} "
-          f"(K={K})")
+        grad_ci = report_mean_with_ci(
+            grad_correct, metric="grad_ablation_accuracy",
+            context={**ci_ctx, "condition": "grad_nullspace"},
+            cis_jsonl=cis_jsonl,
+            n_boot=args.n_boot,
+        )
 
-    # (i) Pooled CI: bootstrap over K*N entries
-    rand_ci = bootstrap_mean(
-        rand_correct_pooled,
-        metric="rand_ablation_accuracy",
-        n_boot=args.n_boot,
-    )
-    save_record(cis_jsonl, rand_ci,
-                context={**ci_ctx, "condition": "rand_nullspace_pooled",
-                         "seed_pooling": "concat", "n_random_seeds": K})
-    print(f"  [CI] rand_ablation (pooled): {rand_ci.to_short_str()}")
+        # ── Random ablation: K independent seeds ─────────────────────
+        #
+        # For each seed s_k = args.seed + k:
+        #   1. Build random subspace projectors (rank-matched to gradient)
+        #   2. Run ablation eval → per-instance correctness vector (length N)
+        #   3. Save per-seed CI record
+        #   4. Accumulate into pooled vector, then discard per-seed outputs
+        #
+        # rand_correct_pooled = concat of K correctness vectors (length K*N)
+        # rand_correct_per_seed_accs[k] = mean accuracy for seed k
 
-    rand_acc = float(rand_correct_pooled.mean())
+        N = len(data)
+        rand_correct_pooled = []       # will be length K*N
+        rand_correct_per_seed_accs = []
 
-    # ── Paired tests: baseline vs ablated ─────────────────────────
-    #   diff = baseline_correct_i - ablated_correct_i
-    #   positive diff = baseline was correct, ablated was wrong
-    grad_drop_ci = paired_bootstrap_diff(
-        baseline_correct, grad_correct,
-        metric="accuracy_drop_grad",
-        n_boot=args.n_boot,
-    )
-    save_record(cis_jsonl, grad_drop_ci,
-                context={**ci_ctx, "condition": "baseline_minus_grad"})
-    print(f"  [CI] accuracy_drop_grad: {grad_drop_ci.to_short_str()}")
+        for k in range(K):
+            s_k = args.seed + k
+            print(f"\n  Running rand-nullspace control (seed {s_k}, "
+                  f"{k+1}/{K})...")
 
-    # Paired test for rand: repeat baseline K times to match pooled rand
-    #   baseline_rep = tile(baseline_correct, K)  → length K*N
-    #   rand_correct_pooled[k*N + i] is paired with baseline_rep[k*N + i]
-    baseline_rep = np.tile(np.array(baseline_correct, dtype=np.float64), K)
-    rand_drop_ci = paired_bootstrap_diff(
-        baseline_rep, rand_correct_pooled,
-        metric="accuracy_drop_rand",
-        n_boot=args.n_boot,
-    )
-    save_record(cis_jsonl, rand_drop_ci,
-                context={**ci_ctx, "condition": "baseline_minus_rand",
-                         "seed_pooling": "concat", "n_random_seeds": K})
-    print(f"  [CI] accuracy_drop_rand (pooled): {rand_drop_ci.to_short_str()}")
+            nullspace_rand_k, subspace_rand_k = build_random_subspace_projectors(
+                ranks, D, seed=s_k,
+            )
+            rand_fn_k = make_projection_intervention(nullspace_rand_k, args.device)
+            rand_correct_k = _eval_correctness(rand_fn_k, f"Rand s{s_k}")
 
-    # McNemar: gradient vs baseline (deterministic, unpooled)
-    mc_grad = mcnemar_test(baseline_correct, grad_correct,
-                           metric="mcnemar_baseline_vs_grad")
-    save_record(cis_jsonl, mc_grad, context={**ci_ctx})
-    print(f"  [CI] McNemar baseline vs grad: p={mc_grad['p_value']:.4g}")
+            # Per-seed CI record
+            seed_acc = sum(rand_correct_k) / max(N, 1)
+            rand_correct_per_seed_accs.append(seed_acc)
+            # seed_ci = report_mean_with_ci(
+            #     rand_correct_k, metric="rand_ablation_accuracy",
+            #     context={**ci_ctx, "condition": "rand_nullspace",
+            #              "seed": s_k, "seed_index": k,
+            #              "n_random_seeds": K},
+            #     cis_jsonl=cis_jsonl,
+            #     n_boot=args.n_boot,
+            # )
 
-    # McNemar: rand pooled vs baseline repeated
-    mc_rand = mcnemar_test(
-        baseline_rep.astype(int).tolist(),
-        rand_correct_pooled.astype(int).tolist(),
-        metric="mcnemar_baseline_vs_rand",
-    )
-    save_record(cis_jsonl, mc_rand,
-                context={**ci_ctx, "seed_pooling": "concat",
-                         "n_random_seeds": K})
-    print(f"  [CI] McNemar baseline vs rand (pooled): "
-          f"p={mc_rand['p_value']:.4g}")
+            # Accumulate into pooled vector, then free per-seed data
+            rand_correct_pooled.extend(rand_correct_k)
+            del nullspace_rand_k, subspace_rand_k, rand_correct_k
 
-    print(f"\n  {'='*50}")
-    print(f"  ABLATION SUMMARY")
-    print(f"  {'='*50}")
-    print(f"  Baseline:        {baseline_ci.to_short_str()}")
-    print(f"  Grad-nullspace:  {grad_ci.to_short_str()}  "
-          f"(drop: {grad_drop_ci.to_short_str()})")
-    print(f"  Rand-nullspace:  {rand_ci.to_short_str()}  "
-          f"(drop: {rand_drop_ci.to_short_str()})  [K={K} seeds pooled]")
+        rand_correct_per_seed_accs = np.array(rand_correct_per_seed_accs)
+        rand_correct_pooled = np.array(rand_correct_pooled, dtype=np.float64)
 
-    ablation_results = {
-        "task": args.task, "model": args.model,
-        "baseline_accuracy": baseline_acc,
-        "baseline_ci": [baseline_ci.ci_low, baseline_ci.ci_high],
-        "grad_accuracy": grad_acc,
-        "grad_ci": [grad_ci.ci_low, grad_ci.ci_high],
-        "rand_accuracy": rand_acc,
-        "rand_ci": [rand_ci.ci_low, rand_ci.ci_high],
-        "accuracy_drop_grad": baseline_acc - grad_acc,
-        "accuracy_drop_grad_ci": [grad_drop_ci.ci_low, grad_drop_ci.ci_high],
-        "accuracy_drop_rand": float(np.mean(baseline_rep) - rand_acc),
-        "accuracy_drop_rand_ci": [rand_drop_ci.ci_low, rand_drop_ci.ci_high],
-        "mcnemar_grad_p": mc_grad["p_value"],
-        "mcnemar_rand_p": mc_rand["p_value"],
-        "ranks_per_t": ranks,
-        "n_random_seeds": K,
-        "rand_seed_mean": float(rand_correct_per_seed_accs.mean()),
-        "rand_seed_std": float(rand_correct_per_seed_accs.std()),
-    }
-    abl_path = output_dir / "ablation_results.json"
-    with open(abl_path, "w") as f:
-        json.dump(deep_convert(ablation_results), f, indent=2)
-    print(f"  Saved -> {abl_path}")
+        # (ii) Cross-seed summary record:
+        #   point = mean of per-seed accuracies
+        #   extra.seed_std = std of per-seed accuracies
+        seed_mean_rec = BootstrapResult(
+            metric="rand_ablation_accuracy_seed_mean",
+            point=float(rand_correct_per_seed_accs.mean()),
+            ci_low=float("nan"), ci_high=float("nan"),
+            ci_level=95.0, n=K, n_boot=0, seed=args.seed,
+            method="seed_summary",
+            extra={"seed_std": float(rand_correct_per_seed_accs.std()),
+                   "n_random_seeds": K,
+                   "per_seed_accs": rand_correct_per_seed_accs.tolist()},
+        )
+        save_record(cis_jsonl, seed_mean_rec,
+                    context={**ci_ctx, "condition": "rand_nullspace_seed_summary"})
+        print(f"  [CI] rand_ablation seed_mean: "
+              f"{seed_mean_rec.point:.3f} ± {seed_mean_rec.extra['seed_std']:.4f} "
+              f"(K={K})")
+
+        # (i) Pooled CI: bootstrap over K*N entries
+        rand_ci = bootstrap_mean(
+            rand_correct_pooled,
+            metric="rand_ablation_accuracy",
+            n_boot=args.n_boot,
+        )
+        save_record(cis_jsonl, rand_ci,
+                    context={**ci_ctx, "condition": "rand_nullspace_pooled",
+                             "seed_pooling": "concat", "n_random_seeds": K})
+        print(f"  [CI] rand_ablation (pooled): {rand_ci.to_short_str()}")
+
+        rand_acc = float(rand_correct_pooled.mean())
+
+        # ── Paired tests: baseline vs ablated ─────────────────────────
+        #   diff = baseline_correct_i - ablated_correct_i
+        #   positive diff = baseline was correct, ablated was wrong
+        grad_drop_ci = paired_bootstrap_diff(
+            baseline_correct, grad_correct,
+            metric="accuracy_drop_grad",
+            n_boot=args.n_boot,
+        )
+        save_record(cis_jsonl, grad_drop_ci,
+                    context={**ci_ctx, "condition": "baseline_minus_grad"})
+        print(f"  [CI] accuracy_drop_grad: {grad_drop_ci.to_short_str()}")
+
+        # Paired test for rand: repeat baseline K times to match pooled rand
+        #   baseline_rep = tile(baseline_correct, K)  → length K*N
+        #   rand_correct_pooled[k*N + i] is paired with baseline_rep[k*N + i]
+        baseline_rep = np.tile(np.array(baseline_correct, dtype=np.float64), K)
+        rand_drop_ci = paired_bootstrap_diff(
+            baseline_rep, rand_correct_pooled,
+            metric="accuracy_drop_rand",
+            n_boot=args.n_boot,
+        )
+        save_record(cis_jsonl, rand_drop_ci,
+                    context={**ci_ctx, "condition": "baseline_minus_rand",
+                             "seed_pooling": "concat", "n_random_seeds": K})
+        print(f"  [CI] accuracy_drop_rand (pooled): {rand_drop_ci.to_short_str()}")
+
+        # McNemar: gradient vs baseline (deterministic, unpooled)
+        mc_grad = mcnemar_test(baseline_correct, grad_correct,
+                               metric="mcnemar_baseline_vs_grad")
+        save_record(cis_jsonl, mc_grad, context={**ci_ctx})
+        print(f"  [CI] McNemar baseline vs grad: p={mc_grad['p_value']:.4g}")
+
+        # McNemar: rand pooled vs baseline repeated
+        mc_rand = mcnemar_test(
+            baseline_rep.astype(int).tolist(),
+            rand_correct_pooled.astype(int).tolist(),
+            metric="mcnemar_baseline_vs_rand",
+        )
+        save_record(cis_jsonl, mc_rand,
+                    context={**ci_ctx, "seed_pooling": "concat",
+                             "n_random_seeds": K})
+        print(f"  [CI] McNemar baseline vs rand (pooled): "
+              f"p={mc_rand['p_value']:.4g}")
+
+        print(f"\n  {'='*50}")
+        print(f"  ABLATION SUMMARY")
+        print(f"  {'='*50}")
+        print(f"  Baseline:        {baseline_ci.to_short_str()}")
+        print(f"  Grad-nullspace:  {grad_ci.to_short_str()}  "
+              f"(drop: {grad_drop_ci.to_short_str()})")
+        print(f"  Rand-nullspace:  {rand_ci.to_short_str()}  "
+              f"(drop: {rand_drop_ci.to_short_str()})  [K={K} seeds pooled]")
+
+        ablation_results = {
+            "task": args.task, "model": args.model,
+            "model_family": args.model_family,
+            "baseline_accuracy": baseline_acc,
+            "baseline_ci": [baseline_ci.ci_low, baseline_ci.ci_high],
+            "grad_accuracy": grad_acc,
+            "grad_ci": [grad_ci.ci_low, grad_ci.ci_high],
+            "rand_accuracy": rand_acc,
+            "rand_ci": [rand_ci.ci_low, rand_ci.ci_high],
+            "accuracy_drop_grad": baseline_acc - grad_acc,
+            "accuracy_drop_grad_ci": [grad_drop_ci.ci_low, grad_drop_ci.ci_high],
+            "accuracy_drop_rand": float(np.mean(baseline_rep) - rand_acc),
+            "accuracy_drop_rand_ci": [rand_drop_ci.ci_low, rand_drop_ci.ci_high],
+            "mcnemar_grad_p": mc_grad["p_value"],
+            "mcnemar_rand_p": mc_rand["p_value"],
+            "ranks_per_t": ranks,
+            "n_random_seeds": K,
+            "rand_seed_mean": float(rand_correct_per_seed_accs.mean()),
+            "rand_seed_std": float(rand_correct_per_seed_accs.std()),
+        }
+        with open(abl_path, "w") as f:
+            json.dump(deep_convert(ablation_results), f, indent=2)
+        print(f"  Saved -> {abl_path}")
+    else:
+        # ── Resume: ablation already complete ───────────────────────
+        print("\n" + "=" * 60)
+        print("SKIPPING ABLATION (found completed results)")
+        print("=" * 60)
+        with open(baseline_texts_path) as f:
+            _bt = json.load(f)
+        baseline_texts = _bt["baseline_texts"]
+        with open(abl_path) as f:
+            _abl = json.load(f)
+        print(f"  Loaded baseline_texts ({len(baseline_texts)} instances)"
+              f"  from {baseline_texts_path}")
+        print(f"  Loaded ablation summary from {abl_path}")
+        print(f"\n  {'='*50}")
+        print(f"  ABLATION SUMMARY (cached)")
+        print(f"  {'='*50}")
+        bl, gl, rl = (_abl["baseline_ci"], _abl["grad_ci"], _abl["rand_ci"])
+        print(f"  Baseline:        {_abl['baseline_accuracy']:.3f} "
+              f"[{bl[0]:.3f},{bl[1]:.3f}]")
+        print(f"  Grad-nullspace:  {_abl['grad_accuracy']:.3f} "
+              f"[{gl[0]:.3f},{gl[1]:.3f}]  "
+              f"(drop {_abl['accuracy_drop_grad']:+.3f}, "
+              f"McNemar p={_abl['mcnemar_grad_p']:.4g})")
+        print(f"  Rand-nullspace:  {_abl['rand_accuracy']:.3f} "
+              f"[{rl[0]:.3f},{rl[1]:.3f}]  "
+              f"(drop {_abl['accuracy_drop_rand']:+.3f}, "
+              f"McNemar p={_abl['mcnemar_rand_p']:.4g})  "
+              f"[K={_abl['n_random_seeds']} seeds pooled]")
+        # Sanity: bases must match the cached ablation's ranks/seed count.
+        if _abl.get("ranks_per_t") and {int(k): v for k, v in _abl["ranks_per_t"].items()} != ranks:
+            print("  [WARN] cached ablation ranks_per_t != current bases ranks; "
+                  "bases.npz may have changed since the cached run.")
+        if _abl.get("n_random_seeds") != K:
+            print(f"  [WARN] cached ablation used n_random_seeds="
+                  f"{_abl.get('n_random_seeds')} but --n_random_seeds={K} now; "
+                  "amplification rand control will use the current K.")
+
 
     # ════════════════════════════════════════════════════════════════
     # PART 2: AMPLIFICATION — h' = h^null + alpha * h^c
@@ -804,6 +920,7 @@ def main():
         grad_amplification, _ = run_amplification_multigpu(
             args.task, args.model, args.n_thoughts, data, alphas,
             baseline_texts, subspace_grad, dummy_sub_rand, args.n_gpus,
+            family=args.model_family,
         )
         del dummy_null_rand, dummy_sub_rand
     else:
@@ -836,6 +953,7 @@ def main():
             _, rand_amp_k = run_amplification_multigpu(
                 args.task, args.model, args.n_thoughts, data, alphas,
                 baseline_texts, subspace_grad, subspace_rand_k, args.n_gpus,
+                family=args.model_family, run_grad=False,
             )
         else:
             rand_amp_k = run_amplification_sweep(
@@ -985,6 +1103,7 @@ def main():
 
     amplification_results = {
         "task": args.task, "model": args.model,
+        "model_family": args.model_family,
         "alphas": alphas,
         "grad_amplification": deep_convert(grad_amplification),
         "rand_flip_pooled_rates": {

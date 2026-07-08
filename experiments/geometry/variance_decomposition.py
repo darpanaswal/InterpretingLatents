@@ -12,19 +12,26 @@ Variance decomposition:
     var_instance = E_i[ || mu_i - mu ||^2 ]          (between-instance)
     var_residual = var_total - var_timestep - var_instance
 
-Output files (written to THOUGHTS/<task>/<model>/diagnose/):
+Output logs and reports (written to VARIANCE_DECOMPOSITION/<family>/<task>/<model>/):
     - variance_report.json
     - variance_decomposition.txt
-    - pca_original.png
-    - pca_original.pdf
+
+Plots (written to Plots/variance_decomposition/pca_<model>/<task>/):
+    - <family>.pdf
 
 Aggregate paper files:
-    - tables/tab_variance_decomposition_main.tex
-    - tables/tab_variance_decomposition_stats.tex
+    - Tables/main/variance_decomposition_<family>.tex
+    - Tables/statistical/variance_decomposition_<family>.tex
 
 Usage:
     python -m experiments.geometry.variance_decomposition --task prosqa --model coconut
     python -m experiments.geometry.variance_decomposition --all
+    # Llama:
+    python -m experiments.geometry.variance_decomposition --all --model_family llama
+    # Both families (reuses existing outputs, writes tables for each):
+    python -m experiments.geometry.variance_decomposition --all --model_family both
+    # Force recompute:
+    python -m experiments.geometry.variance_decomposition --all --model_family both --force
 """
 
 import sys
@@ -52,9 +59,6 @@ MODELS = [
     ("coconut_u", r"C$_u$"),
     ("codi", "CODI"),
 ]
-
-DEFAULT_MAIN_TEX = BASE_DIR / "tables" / "tab_variance_decomposition_main.tex"
-DEFAULT_APPENDIX_TEX = BASE_DIR / "tables" / "tab_variance_decomposition_stats.tex"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -91,15 +95,15 @@ def try_load(path):
         return None
     return load_thoughts(path)
 
-def load_original_thoughts(task, model_name):
+def load_original_thoughts(task, model_name, family="gpt2"):
     """Load only the original thoughts."""
-    base_dir = THOUGHTS / task
+    base_dir = THOUGHTS / family / task
     orig_path = base_dir / f"thoughts_{model_name}.pt"
     orig = try_load(orig_path)
     if orig is None:
         raise FileNotFoundError(
             f"Original thoughts missing at {orig_path}. "
-            f"Run extract_thoughts.py first."
+            f"Run extract_thoughts.py first (--model_family {family})."
         )
     return orig
 
@@ -237,7 +241,8 @@ def _stratified_flatten(thoughts, max_points=6000, seed=0):
     keep.sort()
     return flat[keep], labels[keep]
 
-def plot_pca(thoughts, model, out_dir, max_points=6000, seed=0):
+def plot_pca(thoughts, out_pdf, max_points=6000, seed=0):
+    out_dir = out_pdf.parent
     mpl_config = out_dir / ".mplconfig"
     mpl_config.mkdir(parents=True, exist_ok=True)
     xdg_cache = out_dir / ".cache"
@@ -273,29 +278,28 @@ def plot_pca(thoughts, model, out_dir, max_points=6000, seed=0):
     ax.margins(x=0.035, y=0.06)
     fig.tight_layout(pad=0.25)
 
-    pdf = out_dir / f"thought_pca_timestep_{model}.pdf"
-    fig.savefig(pdf, bbox_inches="tight", pad_inches=0.01)
+    fig.savefig(out_pdf, bbox_inches="tight", pad_inches=0.01)
     plt.close(fig)
-    return pdf
+    return out_pdf
 
 
 # ═══════════════════════════════════════════════════════════════════
 # TeX tables
 # ═══════════════════════════════════════════════════════════════════
 
-def load_report(task, model):
-    path = VARIANCE_DECOMPOSITION / task / model / "variance_report.json"
+def load_report(task, model, family="gpt2"):
+    path = VARIANCE_DECOMPOSITION / family / task / model / "variance_report.json"
     if not path.exists():
         return None
     with open(path) as f:
         return json.load(f)
 
-def collect_reports():
+def collect_reports(family="gpt2"):
     data = {}
     for task, _ in TASKS:
         data[task] = {}
         for model, _ in MODELS:
-            data[task][model] = load_report(task, model)
+            data[task][model] = load_report(task, model, family=family)
     return data
 
 def pm_pct(report, key, decimals=1):
@@ -390,7 +394,6 @@ def build_appendix_table(data):
                 f"{n} \\\\"
             )
 
-    # Close the table after all tasks are processed
     lines += [
         r"\bottomrule",
         r"\end{tabular}",
@@ -400,8 +403,8 @@ def build_appendix_table(data):
     ]
     return "\n".join(lines).strip()
 
-def write_tex_tables(out_main=DEFAULT_MAIN_TEX, out_appendix=DEFAULT_APPENDIX_TEX):
-    data = collect_reports()
+def write_tex_tables(out_main, out_appendix, family="gpt2"):
+    data = collect_reports(family=family)
     out_main = Path(out_main)
     out_appendix = Path(out_appendix)
     out_main.parent.mkdir(parents=True, exist_ok=True)
@@ -415,22 +418,49 @@ def write_tex_tables(out_main=DEFAULT_MAIN_TEX, out_appendix=DEFAULT_APPENDIX_TE
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
-def run_one(task, model, args):
+def run_one(task, model, family, args):
     out_dir = Path(args.output_dir) if args.output_dir else (
-        VARIANCE_DECOMPOSITION / task / model
+        VARIANCE_DECOMPOSITION / family / task / model
     )
     out_dir.mkdir(parents=True, exist_ok=True)
+    report_path = out_dir / "variance_report.json"
 
+    needs_compute = args.force or not report_path.exists()
+    
+    # If we don't need to compute AND plotting is disabled, exit entirely.
+    if not needs_compute and not args.plot_pca:
+        print(f"[SKIP] task={task} model={model} family={family} -> reusing {report_path}")
+        return report_path
+
+    # Load thoughts once, as both plotting and computing require them.
+    thoughts = load_original_thoughts(task, model, family=family)
+
+    # 1. Always plot if requested, regardless of computation status
+    if args.plot_pca:
+        pdf_path = BASE_DIR / "Plots" / "variance_decomposition" / f"pca_{model}_{task}_{family}.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf = plot_pca(
+            thoughts,
+            pdf_path,
+            max_points=args.max_pca_points,
+            seed=args.seed,
+        )
+        print(f"[INFO] PCA PDF saved to {pdf}")
+
+    # 2. Skip the heavy bootstrapping/variance math if the report exists
+    if not needs_compute:
+        print(f"[SKIP] Computation task={task} model={model} family={family} -> reusing {report_path}")
+        return report_path
+
+    # 3. Otherwise, run the full computation
     previous_stdout = sys.stdout
     logger = Logger(out_dir / "variance_decomposition.txt")
     sys.stdout = logger
 
     try:
-        print(f"[INFO] task={task}  model={model}")
+        print(f"[INFO] task={task}  model={model}  family={family}")
         print(f"[INFO] output_dir={out_dir}")
 
-        thoughts = load_original_thoughts(task, model)
-        
         T = thoughts.shape[1]
         D = int(thoughts.shape[2])
         N = int(thoughts.shape[0])
@@ -464,20 +494,9 @@ def run_one(task, model, args):
         
         print_report(report, task, model)
 
-        report_path = out_dir / "variance_report.json"
         with open(report_path, "w") as f:
             json.dump(report, f, indent=2)
         print(f"\n[INFO] Report saved to {report_path}")
-
-        if args.plot_pca:
-            pdf = plot_pca(
-                thoughts,
-                model,
-                out_dir,
-                max_points=args.max_pca_points,
-                seed=args.seed,
-            )
-            print(f"[INFO] PCA PDF saved to {pdf}")
 
         return report_path
     finally:
@@ -491,6 +510,16 @@ def main():
     )
     parser.add_argument("--task", choices=[t for t, _ in TASKS])
     parser.add_argument("--model", choices=[m for m, _ in MODELS])
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama", "both"],
+        default="gpt2",
+        help="Base model family. Determines the thoughts load path "
+             "(THOUGHTS/<family>/...) and namespaces all outputs. "
+             "'both' runs gpt2 and llama and writes tables for each.",
+    )
+    parser.add_argument("--force", action="store_true",
+                        help="Recompute even if variance_report.json exists "
+                             "(default: reuse existing outputs).")
     parser.add_argument("--all", action="store_true",
                         help="Run all task/model combinations.")
     parser.add_argument("--output_dir", default=None,
@@ -505,25 +534,47 @@ def main():
     parser.add_argument("--write_tables", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Write aggregate main/appendix TeX tables.")
-    parser.add_argument("--out_main", default=str(DEFAULT_MAIN_TEX))
-    parser.add_argument("--out_appendix", default=str(DEFAULT_APPENDIX_TEX))
+    parser.add_argument("--out_main", default=None,
+                        help="Override main TeX path. Default: "
+                             "Tables/main/variance_decomposition_<family>.tex")
+    parser.add_argument("--out_appendix", default=None,
+                        help="Override appendix TeX path. Default: "
+                             "Tables/statistical/variance_decomposition_<family>.tex")
     args = parser.parse_args()
+
+    families = ["gpt2", "llama"] if args.model_family == "both" else [args.model_family]
+
+    if len(families) > 1 and (args.out_main or args.out_appendix):
+        parser.error("--out_main/--out_appendix cannot be combined with "
+                     "--model_family both (paths would collide)")
+    if len(families) > 1 and args.output_dir:
+        parser.error("--output_dir is only supported for a single family run")
 
     if args.all:
         if args.output_dir:
             raise ValueError("--output_dir is only supported for a single --task/--model run")
-        for task, _ in TASKS:
-            for model, _ in MODELS:
-                run_one(task, model, args)
+        for family in families:
+            for task, _ in TASKS:
+                for model, _ in MODELS:
+                    run_one(task, model, family, args)
     else:
         if not args.task or not args.model:
             parser.error("provide --task and --model, or use --all")
-        run_one(args.task, args.model, args)
+        for family in families:
+            run_one(args.task, args.model, family, args)
 
     if args.write_tables:
-        out_main, out_appendix = write_tex_tables(args.out_main, args.out_appendix)
-        print(f"[OK] Main table   -> {out_main.resolve()}")
-        print(f"[OK] Appendix     -> {out_appendix.resolve()}")
+        for family in families:
+            out_main = args.out_main or str(
+                BASE_DIR / "Tables" / "main" / f"variance_decomposition_{family}.tex"
+            )
+            out_appendix = args.out_appendix or str(
+                BASE_DIR / "Tables" / "statistical" / f"variance_decomposition_{family}.tex"
+            )
+            out_main, out_appendix = write_tex_tables(
+                out_main, out_appendix, family=family)
+            print(f"[OK] {family} main table -> {out_main.resolve()}")
+            print(f"[OK] {family} appendix   -> {out_appendix.resolve()}")
 
 
 if __name__ == "__main__":

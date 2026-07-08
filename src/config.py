@@ -43,6 +43,7 @@ GSM_TEST = DATA_DIR / "gsm_test.json"
 
 MODEL_DIR = BASE_DIR / "model"
 BASE_GPT2 = MODEL_DIR / "gpt2"
+BASE_LLAMA = MODEL_DIR / "llama"
 
 ### Finetuned models
 PROSQA_MODELS = MODEL_DIR / "prosqa"

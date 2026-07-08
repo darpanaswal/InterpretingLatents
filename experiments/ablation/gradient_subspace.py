@@ -72,14 +72,18 @@ All artefacts go to:
 
 Usage
 -----
-    python -u -m experiments.geometry.gradient_subspace --task prosqa --model pause
-    python -u -m experiments.geometry.gradient_subspace --task prosqa --model coconut
-    python -u -m experiments.geometry.gradient_subspace --task prosqa --model coconut_u
-    python -u -m experiments.geometry.gradient_subspace --task prosqa --model codi
-    python -u -m experiments.geometry.gradient_subspace --task gsm    --model pause
-    python -u -m experiments.geometry.gradient_subspace --task gsm    --model coconut
-    python -u -m experiments.geometry.gradient_subspace --task gsm    --model coconut_u
-    python -u -m experiments.geometry.gradient_subspace --task gsm    --model codi
+    python -u -m experiments.ablation.gradient_subspace --task prosqa --model pause
+    python -u -m experiments.ablation.gradient_subspace --task prosqa --model coconut
+    python -u -m experiments.ablation.gradient_subspace --task prosqa --model coconut_u
+    python -u -m experiments.ablation.gradient_subspace --task prosqa --model codi
+    python -u -m experiments.ablation.gradient_subspace --task gsm    --model pause
+    python -u -m experiments.ablation.gradient_subspace --task gsm    --model coconut
+    python -u -m experiments.ablation.gradient_subspace --task gsm    --model coconut_u
+    python -u -m experiments.ablation.gradient_subspace --task gsm    --model codi
+
+    # Llama family (add --model_family llama):
+    python -u -m experiments.ablation.gradient_subspace --task gsm \
+        --model coconut_u --model_family llama
 """
 
 import json
@@ -157,7 +161,8 @@ def extract_gradient_coconut(
             p.requires_grad_(True)
 
     # ── Encode prompt + start_latent ───────────────────────────────
-    question_tokens = tokenizer.encode(sample["question"], add_special_tokens=True)
+    from src.utils import tokenize_question_for_recurrence
+    question_tokens = tokenize_question_for_recurrence(tokenizer, sample["question"])
     input_ids = torch.tensor(
         [question_tokens + [start_id]], device=device,
     )
@@ -268,9 +273,8 @@ def extract_gradient_pause(
       then placing each h_t into inputs_embeds with a copy that keeps
       the graph.
     """
-    question_tokens = tokenizer.encode(
-        sample["question"] + "\n", add_special_tokens=True,
-    )
+    from src.utils import tokenize_question_for_recurrence
+    question_tokens = tokenize_question_for_recurrence(tokenizer, sample["question"])
     input_ids_list = (
         question_tokens + [start_id] + [latent_id] * n_thoughts + [end_id]
     )
@@ -323,7 +327,7 @@ def extract_gradient_pause(
             embeds_per_pos.append(inputs_embeds_base[0, j, :].detach())
     inputs_embeds = torch.stack(embeds_per_pos, dim=0).unsqueeze(0)  # (1, L, D)
 
-    attention_mask = torch.ones((1, L), device=device)
+    attention_mask = torch.ones((1, L), dtype=torch.long, device=device)
     position_ids = torch.arange(L, device=device).unsqueeze(0)
 
     outputs = base_model(
@@ -703,6 +707,10 @@ def main():
         choices=["coconut", "coconut_u", "pause", "codi"],
         default="coconut_u",
     )
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
+        help="Base model family. Determines checkpoint paths and dtype.",
+    )
     parser.add_argument("--n_thoughts", type=int, default=6)
     parser.add_argument("--max_instances", type=int, default=None,
                         help="Gradient extraction is slower than inference; "
@@ -721,24 +729,29 @@ def main():
     set_seed(args.seed)
 
     output_dir = (BASE_DIR / "outputs" / "gradient_geometry"
-                  / args.task / args.model)
+                  / args.model_family / args.task / args.model)
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[main] task={args.task}  model={args.model}")
+    print(f"[main] task={args.task}  model={args.model}  family={args.model_family}")
     print(f"[main] output_dir: {output_dir}")
 
     is_codi = (args.model == "codi")
 
     # ── Load model ─────────────────────────────────────────────────
     if is_codi:
-        codi_dict = setup_codi_model(args.task, args.device)
+        codi_dict = setup_codi_model(args.task, args.device, family=args.model_family)
         D = codi_dict['hidden_size']
         coconut_model = base_model = tokenizer = None
         latent_id = start_id = end_id = None
     else:
         codi_dict = None
         coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
-            setup_model_and_tokenizer(args.task, args.model, args.device)
-        D = base_model.config.n_embd
+            setup_model_and_tokenizer(args.task, args.model, args.device,
+                                      family=args.model_family)
+        # GPT-2 exposes `n_embd`; Llama exposes `hidden_size`.
+        D = getattr(base_model.config, "n_embd",
+                    getattr(base_model.config, "hidden_size", None))
+        if D is None:
+            raise RuntimeError("Could not determine hidden size from model config")
 
     # We must be outside any no_grad context. setup_*_model puts models
     # in eval() (which disables dropout/batchnorm-train-mode but does
@@ -776,6 +789,7 @@ def main():
     summary = {
         "task": args.task,
         "model": args.model,
+        "model_family": args.model_family,
         "n_instances": int(N),
         "n_skipped": int(n_skipped),
         "T": int(T),

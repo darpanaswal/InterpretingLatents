@@ -1,52 +1,43 @@
 """
 Standalone plotting for markovianity_test.py results.
 
-Reads ``out_dir/results_{model}_{task}.json`` (the flat layout produced
-by ``markovianity_test.py``) and writes:
+Reads ``out_dir/results_{model}_{task}[_subspace].json`` and CI logs.
+Produces:
+    out_dir/figures/markov_heatmaps.png   -- 2x2 grid of R^2 heatmaps
+    out_dir/tab_markovianity_stats.tex    -- Appendix summary table
 
-  out_dir/
-      summary.csv
-      summary.tex
-      figures/
-          order_curves_r2_uniform.png        -- main paper figure
-          order_curves_r2_var_weighted.png  -- appendix
-          order_curves_cosine.png            -- appendix
-          regime_scatter.png                 -- bigram identity vs linear-gain
-          per_step_heatmap_{task}_{model}.png   -- one per (task, model)
-
-No fitting, no extraction -- pure replotter. Run after markovianity_test.py.
-
-All input and output paths are hardcoded; no CLI flags.
 """
 
 import csv
 import json
 import numpy as np
 from pathlib import Path
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from src.config import BASE_DIR
 from collections import defaultdict
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Hardcoded paths (must match markovianity_test.py default out_dir)
+# Hardcoded paths
 # ═══════════════════════════════════════════════════════════════════
 
 OUT_DIR = BASE_DIR / "outputs" / "markovianity"
 FIG_DIR = OUT_DIR / "figures"
-SUMMARY_CSV = OUT_DIR / "summary.csv"
-SUMMARY_TEX = OUT_DIR / "summary.tex"
+SUMMARY_TEX = "Tables/statistical/markovianity_stats.tex"
 
 SUMMARY_ORDER = 1
+METRIC = "r2_uniform"
 
 MODEL_LABELS = {
+    "pause":     "PaT",
     "coconut":   "C",
     "coconut_u": r"C$_u$",
-    "pause":     "PaT",
     "codi":      "CODI",
 }
 
-# Required rendering orders
 MODEL_ORDER = ["pause", "coconut", "coconut_u", "codi"]
 TASK_ORDER = ["prosqa", "gsm"]
 
@@ -55,298 +46,294 @@ TASK_LABELS = {
     "gsm":    "Arithmetic-Reasoning",
 }
 
-
-def fig_label(task, model):
-    """Format used in figure titles, annotations: model (task)."""
-    return f"{MODEL_LABELS.get(model, model)} ({TASK_LABELS.get(task, task)})"
-
-
-def sort_model_key(model_name):
-    """Helper to enforce strict model ordering."""
-    try:
-        return MODEL_ORDER.index(model_name)
-    except ValueError:
-        return 99
-
-
-def sort_task_key(task_name):
-    """Helper to enforce strict task ordering."""
-    try:
-        return TASK_ORDER.index(task_name)
-    except ValueError:
-        return 99
-
-
-def discover_results():
-    results = []
-    for path in sorted(OUT_DIR.glob("results_*.json")):
-        with open(path, "r") as f:
-            r = json.load(f)
-        r["orders"] = {int(k): v for k, v in r["orders"].items()}
-        for o in r["orders"].values():
-            o["linear_per_step"] = {int(k): v for k, v in o["linear_per_step"].items()}
-        results.append(r)
-    return results
-
-
-def _plot_order_curves_metric(results, out_path, metric_key, ylabel, ylim):
-    """
-    Grid of (task x model) panels showing `metric_key` vs Markov order
-    for the four predictors (mean, identity, linear-shared, MLP-shared).
-    """
-    tasks = [t for t in TASK_ORDER if any(r["task"] == t for r in results)]
-    models = [m for m in MODEL_ORDER if any(r["model"] == m for r in results)]
-
-    fig, axes = plt.subplots(len(tasks), len(models),
-                             figsize=(3.5 * len(models), 2.8 * len(tasks)),
-                             sharex=True, sharey=True, squeeze=False)
-    series = [
-        ("mean_baseline", "mean", "tab:gray", ":"),
-        ("identity_baseline", "identity", "tab:red", "--"),
-        ("linear_shared", "linear (shared)", "tab:blue", "-"),
-        ("mlp_shared", "MLP (shared)", "tab:green", "-"),
-    ]
-    for r in results:
-        i = tasks.index(r["task"]); j = models.index(r["model"])
-        ax = axes[i][j]
-        orders = sorted(r["orders"].keys())
-        for key, label, color, ls in series:
-            ys = [r["orders"][o][key][metric_key] for o in orders]
-            ax.plot(orders, ys, color=color, linestyle=ls,
-                    marker="o", label=label, linewidth=1.6)
-        ax.axhline(0.0, color="black", linewidth=0.5, alpha=0.3)
-
-        ax.set_title(MODEL_LABELS.get(r["model"], r["model"]), fontsize=10, pad=8)
-        ax.set_xticks(orders)
-        ax.tick_params(axis="x", labelbottom=True)
-        ax.set_ylim(*ylim)
-        ax.grid(alpha=0.25)
-
-    for ax in axes[-1]:
-        ax.set_xlabel("Markov order")
-    for ax in axes[:, 0]:
-        ax.set_ylabel(ylabel)
-
-    handles, labels = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=4,
-               bbox_to_anchor=(0.5, 1.02), frameon=False)
-
-    fig.tight_layout(rect=(0, 0, 1, 0.94), h_pad=2.0, w_pad=0.5)
-
-    fig.canvas.draw()
-    for i, task in enumerate(tasks):
-        bbox_left = axes[i][0].get_position()
-        bbox_right = axes[i][-1].get_position()
-        x_center = (bbox_left.x0 + bbox_right.x1) / 2.0
-        y_top = bbox_left.y1 + 0.03
-        letter = chr(97 + i)
-        fig.text(x_center, y_top, f"({letter}) {TASK_LABELS.get(task, task)}",
-                 ha="center", va="bottom", fontsize=11, fontweight="bold")
-
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[plot] {out_path}")
-
-
-# (metric_key, file suffix, ylabel, ylim)
-ORDER_CURVE_METRICS = [
-    ("r2_uniform",      "r2_uniform",      r"$R^2$ (uniform avg)",      (-1.1, 1.1)),
-    ("r2_var_weighted", "r2_var_weighted", r"$R^2$ (variance-weighted)", (-1.1, 1.1)),
-    ("cosine",          "cosine",          r"cosine similarity",         (-1.1, 1.1)),
+PREDICTOR_KEYS = [
+    "identity_baseline",
+    "mean_baseline",
+    "linear_shared",
+    "mlp_shared",
 ]
 
+PREDICTOR_LABELS = {
+    "mean_baseline": "Mean",
+    "identity_baseline": "Identity",
+    "linear_shared": "Linear",
+    "mlp_shared": "MLP",
+}
 
-def plot_order_curves(results, fig_dir, suffix=""):
-    for metric_key, met_suffix, ylabel, ylim in ORDER_CURVE_METRICS:
-        _plot_order_curves_metric(
-            results, fig_dir / f"order_curves_{met_suffix}{suffix}.png",
-            metric_key=metric_key, ylabel=ylabel, ylim=ylim,
-        )
+# The CI keys in jsonl corresponding to the above predictors at SUMMARY_ORDER
+def _get_ci_key(predictor, metric, order):
+    if predictor == "mean_baseline":
+        return f"o{order}_mean_baseline_{metric}" # Doesn't exist currently but handled gracefully
+    elif predictor == "identity_baseline":
+        return f"o{order}_identity_{metric}"
+    elif predictor == "linear_shared":
+        return f"o{order}_linear_shared_{metric}"
+    elif predictor == "mlp_shared":
+        # Usually pooled variant is what we care about or seed0
+        return f"o{order}_mlp_shared_{metric}_pooled"
+    return f"o{order}_{predictor}_{metric}"
 
+def load_json(path: Path):
+    if not path.exists():
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
 
-def plot_regime_scatter(results, out_path, order=SUMMARY_ORDER):
+def load_jsonl(path: Path):
+    records = []
+    if not path.exists():
+        return records
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+def discover_results(out_dir: Path):
     """
-    Scatter of identity-baseline R^2 vs linear-gain-over-identity at the
-    given Markov order. Each point is one (task, model) pair: color
-    encodes model, marker shape encodes task. Labels are lifted out
-    of the plot into a legend on the right.
+    Returns data[is_projected][task][model] = {
+        "point": {predictor: value},
+        "ci": {predictor: (low, high)}
+    }
+
+    markovianity_test.py writes outputs/markovianity/<family>/results_<model>_<task>.json,
+    so `out_dir` is expected to be already family-scoped by the caller.
     """
-    task_marker = {"prosqa": "o", "gsm": "s"}
-    model_color = {"coconut": "tab:blue", "coconut_u": "tab:orange",
-                   "pause": "tab:green", "codi": "tab:red"}
+    data = {False: defaultdict(dict), True: defaultdict(dict)}
+    
+    # Initialize all keys
+    for proj in [False, True]:
+        for t in TASK_ORDER:
+            for m in MODEL_ORDER:
+                data[proj][t][m] = {"point": {}, "ci": {}, "n_test": None}
 
-    fig, ax = plt.subplots(figsize=(8.0, 3.5))
+    # Iterate over existing JSONs
+    for path in out_dir.glob("results_*.json"):
+        res = load_json(path)
+        if res is None: continue
+        
+        task = res["task"]
+        model = res["model"]
+        proj = res.get("projected", False)
+        
+        # Suffix for CI file
+        suffix = "_subspace" if proj else ""
+        ci_path = out_dir / f"cis_{model}_{task}{suffix}.jsonl"
+        ci_records = load_jsonl(ci_path)
+        
+        order_data = res["orders"].get(str(SUMMARY_ORDER))
+        if not order_data:
+            order_data = res["orders"].get(SUMMARY_ORDER)
+        
+        if order_data:
+            data[proj][task][model]["n_test"] = res.get("n_test")
+            for p in PREDICTOR_KEYS:
+                # Point estimate
+                p_data = order_data.get(p)
+                if p_data and METRIC in p_data:
+                    data[proj][task][model]["point"][p] = p_data[METRIC]
+                
+                # CI estimate
+                ci_key = _get_ci_key(p, METRIC, SUMMARY_ORDER)
+                ci_match = None
+                for rec in reversed(ci_records):
+                    if rec.get("metric") == ci_key:
+                        ci_match = rec
+                        break
+                
+                # Fallback for MLP if pooled is missing (might use seed0)
+                if ci_match is None and p == "mlp_shared":
+                    ci_key_seed0 = _get_ci_key(p, METRIC, SUMMARY_ORDER).replace("_pooled", "_seed0")
+                    for rec in reversed(ci_records):
+                        if rec.get("metric") == ci_key_seed0:
+                            ci_match = rec
+                            break
 
-    legend_handles = []
-    # Iterate in canonical (task, model) order so the legend reads cleanly.
-    sorted_results = sorted(
-        results,
-        key=lambda r: (sort_task_key(r["task"]), sort_model_key(r["model"])),
-    )
-    for r in sorted_results:
-        if order not in r["orders"]:
-            continue
-        # x = identity-baseline R^2;  y = R^2(linear) - R^2(identity)
-        x = r["orders"][order]["identity_baseline"]["r2_uniform"]
-        y = r["orders"][order]["linear_shared"]["r2_uniform"] - x
+                if ci_match:
+                    data[proj][task][model]["ci"][p] = (ci_match["ci_low"], ci_match["ci_high"])
 
-        marker = task_marker.get(r["task"], "x")
-        color = model_color.get(r["model"], "black")
-        ax.scatter(x, y, marker=marker, color=color,
-                   s=110, edgecolor="black", linewidth=0.7)
+    return data
 
-        # Proxy handle for the external legend: same marker + color.
-        legend_handles.append(plt.Line2D(
-            [0], [0], marker=marker, color="white",
-            markerfacecolor=color, markeredgecolor="black",
-            markeredgewidth=0.7, markersize=10,
-            label=fig_label(r["task"], r["model"]),
-        ))
 
-    ax.axhline(0, color="black", linewidth=0.6, alpha=0.5)
-    ax.axvline(0, color="black", linewidth=0.6, alpha=0.5)
-    ax.set_xlabel(r"Identity baseline $R^2$ (test)")
-    ax.set_ylabel(r"Linear gain over identity (test)")
-    ax.grid(alpha=0.25)
+def plot_heatmaps(data, out_path):
+    fig, axes = plt.subplots(2, 2, figsize=(6.0, 4.0))
+    
+    proj_rows = [(False, "Full Thoughts"), (True, "Gradient-Subspace")]
+    
+    vmin, vmax = -0.1, 1.0
+    
+    for row_idx, (proj, row_title) in enumerate(proj_rows):
+        for col_idx, task in enumerate(TASK_ORDER):
+            ax = axes[row_idx, col_idx]
+            
+            inert_models = []
+            active_models = []
+            
+            for model in MODEL_ORDER:
+                cell_data = data[proj][task].get(model, {})
+                pts = {p: cell_data.get("point", {}).get(p) for p in PREDICTOR_KEYS}
+                pts = {p: v for p, v in pts.items() if v is not None}
+                if not pts:
+                    continue
+                
+                # Account for MLP overfitting: if identity/mean is close to linear/mlp, prefer inert
+                best_inert = max(pts.get("identity_baseline", -float('inf')), pts.get("mean_baseline", -float('inf')))
+                best_active = max(pts.get("linear_shared", -float('inf')), pts.get("mlp_shared", -float('inf')))
+                
+                OVERFIT_MARGIN = 0.1
+                if best_inert >= best_active - OVERFIT_MARGIN:
+                    inert_models.append(model)
+                else:
+                    active_models.append(model)
+                    
+            plot_models = inert_models + active_models
+            M = np.full((len(PREDICTOR_KEYS), len(plot_models)), np.nan)
+            
+            for m_idx, model in enumerate(plot_models):
+                cell_data = data[proj][task].get(model, {})
+                for p_idx, p in enumerate(PREDICTOR_KEYS):
+                    val = cell_data.get("point", {}).get(p)
+                    if val is not None:
+                        M[p_idx, m_idx] = val
 
-    # Anchor the legend to the right edge of the *axes* (not the figure),
-    # so the gap between plot area and legend is fixed regardless of
-    # figure size. bbox_inches="tight" then trims any margin past it.
-    ax.legend(
-        handles=legend_handles,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        frameon=False, fontsize=9, ncol=2,
-        handletextpad=0.4, columnspacing=1.0,
-    )
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+            im = ax.imshow(M, cmap="Blues", vmin=vmin, vmax=vmax, aspect="auto")
+            
+            ax.set_yticks(range(len(PREDICTOR_KEYS)))
+            if col_idx == 0:
+                ax.set_yticklabels([PREDICTOR_LABELS[p] for p in PREDICTOR_KEYS], fontsize=8)
+                ax.set_ylabel(row_title, fontsize=9, fontweight="bold")
+            else:
+                ax.tick_params(axis="y", labelleft=False)
+                
+            if row_idx == 0:
+                ax.set_title(TASK_LABELS[task], fontsize=10, fontweight="bold")
+                
+            ax.set_xticks(range(len(plot_models)))
+            ax.set_xticklabels([MODEL_LABELS[m] for m in plot_models], fontsize=8)
+            
+            # Add separating line and group labels
+            if inert_models and active_models:
+                sep_x = len(inert_models) - 0.5
+                ax.axvline(sep_x, color='black', linewidth=1.5)
+                
+                ax.text((len(inert_models) - 1) / 2.0, len(PREDICTOR_KEYS) + 0.2, "Static", ha="center", va="top", fontsize=9, fontweight="bold", color="dimgrey")
+                ax.text(len(inert_models) + (len(active_models) - 1) / 2.0, len(PREDICTOR_KEYS) + 0.2, "Evolving", ha="center", va="top", fontsize=9, fontweight="bold", color="dimgrey")
+            elif inert_models:
+                ax.text((len(inert_models) - 1) / 2.0, len(PREDICTOR_KEYS) + 0.2, "Static", ha="center", va="top", fontsize=9, fontweight="bold", color="dimgrey")
+            elif active_models:
+                ax.text((len(active_models) - 1) / 2.0, len(PREDICTOR_KEYS) + 0.2, "Evolving", ha="center", va="top", fontsize=9, fontweight="bold", color="dimgrey")
+
+    plt.subplots_adjust(left=0.15, right=0.88, wspace=0.1, hspace=0.6, bottom=0.15)
+    cbar_ax = fig.add_axes([0.90, 0.2, 0.02, 0.6])
+    fig.colorbar(im, cax=cbar_ax, label=rf"$R^2$ (Test)")
+    
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"[plot] {out_path}")
 
-
-def plot_per_step_heatmap(result, out_path):
-    orders = sorted(result["orders"].keys())
-    all_ts = sorted({t for o in orders
-                     for t in result["orders"][o]["linear_per_step"].keys()})
-    M = np.full((len(orders), len(all_ts)), np.nan)
-    for i, o in enumerate(orders):
-        per = result["orders"][o]["linear_per_step"]
-        for j, t in enumerate(all_ts):
-            if t in per:
-                M[i, j] = per[t]["r2_uniform"]
-
-    fig, ax = plt.subplots(figsize=(1.0 + 0.7 * len(all_ts), 1.0 + 0.5 * len(orders)))
-    im = ax.imshow(M, cmap="RdBu_r", vmin=-1.0, vmax=1.0, aspect="auto")
-    ax.set_xticks(range(len(all_ts))); ax.set_xticklabels(all_ts)
-    ax.set_yticks(range(len(orders))); ax.set_yticklabels(orders)
-    ax.set_xlabel("target timestep t")
-    ax.set_ylabel("Markov order")
-    ax.set_title(f"{fig_label(result['task'], result['model'])}:\nper-step linear R² (test)")
-    for i in range(M.shape[0]):
-        for j in range(M.shape[1]):
-            v = M[i, j]
-            if not np.isnan(v):
-                ax.text(j, i, f"{v:+.2f}", ha="center", va="center", fontsize=8,
-                        color="white" if abs(v) > 0.5 else "black")
-    fig.colorbar(im, ax=ax, fraction=0.04)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[plot] {out_path}")
-
-
-def _fmt_signed(x, decimals=3):
-    s = f"{x:+.{decimals}f}"
-    return s.replace("+", r"\phantom{-}")
-
-
-def write_summary(results, out_csv, out_tex, order=SUMMARY_ORDER):
-    rows = []
-    for r in sorted(results, key=lambda r: (sort_task_key(r["task"]), sort_model_key(r["model"]))):
-        if order not in r["orders"]:
-            continue
-        o = r["orders"][order]
-        rows.append({
-            "task": TASK_LABELS.get(r["task"], r["task"]),
-            "model": r["model"],
-            "n_train": r.get("n_train"),
-            "n_test": r.get("n_test"),
-            "identity_R2": o["identity_baseline"]["r2_uniform"],
-            "linear_R2": o["linear_shared"]["r2_uniform"],
-            "mlp_R2": o["mlp_shared"]["r2_uniform"],
-            "linear_gain": (o["linear_shared"]["r2_uniform"] - o["identity_baseline"]["r2_uniform"]),
-        })
-    if not rows:
-        return
-
-    with open(out_csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
-    print(f"[csv ] {out_csv}")
+def build_appendix_table(data, family, out_path):
+    # LaTeX formatting functions
+    def _fmt_ci(pt, ci):
+        if pt is None: return "--"
+        if ci is None: return f"{pt:.3f}"
+        return f"{pt:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
 
     lines = [
-        r"\begin{table}[h]",
+        r"\begin{table}[h!]",
         r"\centering",
-        r"\caption{Bigram (order=1) markovianity summary: test-set $R^2$ for predicting $h_t$ from $h_{t-1}$. The linear transition is a single shared ridge regression. Rows with positive \emph{linear gain} (linear $R^2$ minus identity $R^2$) indicate that fitting a transition adds information beyond just copying the previous thought.}",
-        r"\label{tab:markovianity_bigram}",
-        r"\begin{tabular}{llrrrrrr}",
+        r"\tiny",
+        r"\setlength{\tabcolsep}{4pt}",
+        r"\begin{tabular}{llrrrrrrrr}",
         r"\toprule",
-        r"task & model & $N_\mathrm{tr}$ & $N_\mathrm{te}$ & identity $R^2$ & linear $R^2$ & MLP $R^2$ & linear gain \\",
-        r"\midrule"
+        r"& & \multicolumn{4}{c}{\textbf{Graph-Hopping}} & \multicolumn{4}{c}{\textbf{Arithmetic-Reasoning}} \\",
+        r"\cmidrule(lr){3-6}\cmidrule(lr){7-10}",
+        r"Proj. & Model & " + " & ".join([PREDICTOR_LABELS[p] for p in PREDICTOR_KEYS]) + " & " + " & ".join([PREDICTOR_LABELS[p] for p in PREDICTOR_KEYS]) + r" \\",
+        r"\midrule",
     ]
-    for r in rows:
-        cells = [
-            r["task"],
-            r["model"].replace("_", r"\_"),
-            f"{r['n_train']}",
-            f"{r['n_test']}",
-            _fmt_signed(r["identity_R2"]),
-            _fmt_signed(r["linear_R2"]),
-            _fmt_signed(r["mlp_R2"]),
-            _fmt_signed(r["linear_gain"]),
-        ]
-        if r["linear_gain"] > 0:
-            cells = [r"\textbf{" + c + "}" for c in cells]
-        lines.append(" & ".join(cells) + r" \\")
-    lines.append(r"\bottomrule")
-    lines.append(r"\end{tabular}")
-    lines.append(r"\end{table}")
 
-    with open(out_tex, "w") as f:
+    proj_rows = [(False, "Full"), (True, "Subspace")]
+
+    for p_idx, (proj, proj_label) in enumerate(proj_rows):
+        for m_idx, model in enumerate(MODEL_ORDER):
+            row_cells = []
+            if m_idx == 0:
+                row_cells.append(rf"\multirow{{{len(MODEL_ORDER)}}}{{*}}{{{proj_label}}}")
+            else:
+                row_cells.append("")
+            row_cells.append(MODEL_LABELS[model])
+
+            for task in TASK_ORDER:
+                cell_data = data[proj][task].get(model, {})
+                for p in PREDICTOR_KEYS:
+                    pt = cell_data.get("point", {}).get(p)
+                    ci = cell_data.get("ci", {}).get(p)
+                    row_cells.append(_fmt_ci(pt, ci))
+
+            lines.append(" & ".join(row_cells) + r" \\")
+
+        if p_idx < len(proj_rows) - 1:
+            lines.append(r"\midrule")
+
+    lines += [
+        r"\bottomrule",
+        r"\end{tabular}",
+        rf"\caption{{Markovianity $R^2$ at order 1, test-set with 95\% bootstrap CIs ({family}).}}",
+        rf"\label{{tab:markovianity_{family}}}",
+        r"\end{table}",
+    ]
+
+    with open(out_path, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"[tex ] {out_tex}")
+    print(f"[tex ] {out_path}")
+
+
+def discover_families() -> list:
+    """Families present on disk under outputs/markovianity/<family>/."""
+    found = set()
+    if OUT_DIR.is_dir():
+        for child in OUT_DIR.iterdir():
+            if child.is_dir() and child.name != "figures":
+                found.add(child.name)
+    known = [f for f in ("gpt2", "llama") if f in found]
+    extra = sorted(found - set(known))
+    return known + extra
 
 
 def main():
-    if not OUT_DIR.exists():
-        raise SystemExit(f"OUT_DIR does not exist: {OUT_DIR}")
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--model_family", choices=["gpt2", "llama"], default=None,
+                    help="Restrict to one family. Default: loop all families "
+                         "found under outputs/markovianity/.")
+    ap.add_argument("--tables_dir", default="Tables/statistical",
+                    help="Directory for markovianity_<family>.tex files.")
+    args = ap.parse_args()
 
-    all_results = discover_results()
-    if not all_results:
-        raise SystemExit(f"No results_*.json found under {OUT_DIR}.")
-    
-    # Dynamically group results by their projection mode
-    grouped_results = defaultdict(list)
-    for r in all_results:
-        grouped_results[r.get("projected", False)].append(r)
+    families = ([args.model_family] if args.model_family else discover_families())
+    if not families:
+        print(f"[WARN] No families found under {OUT_DIR}")
+        return
+    print(f"[INFO] Families: {families}")
 
-    # Plot separately for each mode, appending suffixes as needed
-    for is_projected, results in grouped_results.items():
-        suffix = "_subspace" if is_projected else ""
+    tables_dir = Path(args.tables_dir)
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    for family in families:
+        # 1. Point to the actual data directory for this family
+        data_dir = OUT_DIR / family
+        data = discover_results(data_dir)
         
-        plot_order_curves(results, FIG_DIR, suffix=suffix)
-        plot_regime_scatter(results, FIG_DIR / f"regime_scatter{suffix}.png", order=SUMMARY_ORDER)
+        # 2. Ensure your output directory for the plots exists
+        plot_dir = Path("Plots/markov")
+        plot_dir.mkdir(parents=True, exist_ok=True)
 
-        for r in results:
-            out_path = FIG_DIR / f"per_step_heatmap_{r['task']}_{r['model']}{suffix}.png"
-            plot_per_step_heatmap(r, out_path)
+        # 3. Save the plots and tables
+        plot_heatmaps(data, plot_dir / f"markov_heatmaps_{family}.pdf")
+        
+        out_path = tables_dir / f"markovianity_{family}.tex"
+        build_appendix_table(data, family, out_path)
 
-        out_csv = OUT_DIR / f"summary{suffix}.csv"
-        out_tex = OUT_DIR / f"summary{suffix}.tex"
-        write_summary(results, out_csv, out_tex, order=SUMMARY_ORDER)
 
 if __name__ == "__main__":
     main()

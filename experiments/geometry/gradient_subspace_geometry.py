@@ -37,7 +37,7 @@ Bootstrap procedure (Pattern B — function of all instances):
 
 Output
 ------
-    BASE_DIR / outputs / gradient_geometry / <task> / <model> /
+    BASE_DIR / outputs / gradient_geometry / <family> / <task> / <model> /
         diagnosis.json          point estimates + CIs
         bootstrap_cis.jsonl     machine-readable CI records
 
@@ -45,6 +45,9 @@ Usage
 -----
     python -u -m experiments.geometry.gradient_subspace_diagnosis \
         --task prosqa --model coconut_u
+    # Llama:
+    python -u -m experiments.geometry.gradient_subspace_diagnosis \
+        --task prosqa --model coconut_u --model_family llama
 """
 
 import json
@@ -279,10 +282,15 @@ def main():
         choices=["coconut", "coconut_u", "pause", "codi"],
         required=True,
     )
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
+        help="Base model family. Must match the family used by "
+             "gradient_subspace.py; selects the namespaced input/output dir.",
+    )
     parser.add_argument("--bases_path", type=str, default=None,
                         help="Override path to bases.npz. Default: "
                              "BASE_DIR/outputs/gradient_geometry/"
-                             "<task>/<model>/bases.npz")
+                             "<family>/<task>/<model>/bases.npz")
     parser.add_argument("--explained_variance", type=float, default=0.95,
                         help="Cumulative energy threshold for SVD rank "
                              "selection during bootstrap re-SVD.")
@@ -293,8 +301,9 @@ def main():
 
     set_seed(args.seed)
 
+    # Namespaced by family to match gradient_subspace.py's output layout.
     output_dir = (BASE_DIR / "outputs" / "gradient_geometry"
-                  / args.task / args.model)
+                  / args.model_family / args.task / args.model)
     output_dir.mkdir(parents=True, exist_ok=True)
     bases_path = (Path(args.bases_path) if args.bases_path
                   else output_dir / "bases.npz")
@@ -311,7 +320,7 @@ def main():
             f"Run gradient_subspace.py first (needed for bootstrap)."
         )
 
-    print(f"[main] task={args.task}  model={args.model}")
+    print(f"[main] task={args.task}  model={args.model}  family={args.model_family}")
     print(f"[main] bases_path: {bases_path}")
     print(f"[main] grads_path: {grads_path}")
     print(f"[main] output_dir: {output_dir}")
@@ -346,7 +355,8 @@ def main():
 
     # ── Save CI records (JSONL) ───────────────────────────────────
     cis_jsonl = str(output_dir / "bootstrap_cis.jsonl")
-    ci_ctx = {"task": args.task, "model": args.model}
+    ci_ctx = {"task": args.task, "model": args.model,
+              "model_family": args.model_family}
     for r in adj_cis:
         save_record(cis_jsonl, r, context=ci_ctx)
     save_record(cis_jsonl, offdiag_ci, context=ci_ctx)
@@ -356,6 +366,7 @@ def main():
     summary = {
         "task": args.task,
         "model": args.model,
+        "model_family": args.model_family,
         "T": int(T),
         "subspace_ranks": ranks,
         "q3_adjacent_per_t": [r.point for r in adj_cis],

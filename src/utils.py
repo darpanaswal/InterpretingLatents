@@ -128,6 +128,43 @@ def is_pause_model(coconut_model_or_mode):
         return getattr(coconut_model_or_mode, 'feedback_mode', 'continuous') == 'pause_curriculum'
     return False
 
+
+def tokenize_question_for_recurrence(tokenizer, question_text):
+    """
+    Tokenize the question prefix that precedes <start_latent> for
+    pause / coconut / coconut_u inference. Mirrors the training-time format:
+
+      - Llama instruct (chat_template present): apply_chat_template with
+        add_generation_prompt=True, then encode with add_special_tokens=False
+        (chat template already includes BOS).
+      - Otherwise (GPT-2, non-instruct Llama): raw "{q}\n" with
+        add_special_tokens=True.
+
+    Returns a python list of token ids (no batch dim). Use this everywhere
+    a recurrence-style prompt is built manually (i.e. anywhere the code
+    constructs [question_tokens] + [start_latent] + ...).
+
+    Why centralized: every llama pause/coconut script previously used raw
+    encode, which is format-OOD for instruct-tuned Llama. At K=K_max the
+    pause embeddings masked the mismatch (~99.8% on ProsQA), but at K=0
+    the mismatch was exposed (66.4% on ProsQA), producing a spurious
+    "thoughts help by 33%" signal that was actually a format artefact.
+    """
+    use_chat_template = (
+        hasattr(tokenizer, "apply_chat_template")
+        and getattr(tokenizer, "chat_template", None) is not None
+    )
+
+    if use_chat_template:
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": question_text}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        return tokenizer.encode(prompt, add_special_tokens=False)
+    else:
+        return tokenizer.encode(question_text + "\n", add_special_tokens=True)
+
 # ═══════════════════════════════════════════════════════════════════
 # Intervened inference: pause-aware
 # ═══════════════════════════════════════════════════════════════════
@@ -192,7 +229,7 @@ def _intervened_inference_pause(
         KV cache entries that downstream positions attend to.
     """
     question_text = sample["question"]
-    question_tokens = tokenizer.encode(question_text + "\n", add_special_tokens=True)
+    question_tokens = tokenize_question_for_recurrence(tokenizer, question_text)
  
     input_ids_list = (
         question_tokens
@@ -278,9 +315,14 @@ def _intervened_inference_coconut(
     Coconut model: original recurrence-based intervened inference.
     Copied from steering_experiment.py's run_intervened_inference.
     """
-    input_ids = tokenizer.encode(
-        sample["question"] + " <|start-latent|>", return_tensors="pt"
-    ).to(device)
+    # Use the same training-format-aware tokenization as the pause path.
+    # For llama (instruct), this applies the chat template. For gpt2, this
+    # is raw "{q}\n". Then append <start_latent> id manually.
+    question_tokens = tokenize_question_for_recurrence(tokenizer, sample["question"])
+    start_id_local = tokenizer.convert_tokens_to_ids("<|start-latent|>")
+    input_ids = torch.tensor(
+        [question_tokens + [start_id_local]], device=device,
+    )
 
     outputs = base_model(
         input_ids=input_ids,
@@ -391,7 +433,11 @@ def _alpha_sweep_coconut(
     n_alphas = len(alphas)
     
     # 1. Expand the prompt to batch size = n_alphas
-    input_ids = tokenizer.encode(sample["question"] + " <|start-latent|>", return_tensors="pt").to(device)
+    question_tokens = tokenize_question_for_recurrence(tokenizer, sample["question"])
+    start_id_local = tokenizer.convert_tokens_to_ids("<|start-latent|>")
+    input_ids = torch.tensor(
+        [question_tokens + [start_id_local]], device=device,
+    )
     input_ids = input_ids.repeat(n_alphas, 1)
     
     alpha_tensor = torch.tensor(alphas, dtype=torch.float32, device=device).view(n_alphas, 1)
@@ -470,58 +516,82 @@ def run_normal_inference_pauseaware(
     )
 
 
+
+
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Model-loading
 # ═══════════════════════════════════════════════════════════════════
 
-def get_checkpoint_path(task, mode):
+def get_checkpoint_path(task, mode, family="gpt2"):
     model_path = PROSQA_MODELS if task == "prosqa" else GSM_MODELS
+    family_path = model_path / family
+    
     if mode == "base":
         return None
-    if mode == "cot":
-        if model_path == PROSQA_MODELS:
-            return str(model_path / "cot/best_checkpoint.pt")
+        
+    if family == "llama":
+        if mode == "coconut_u":
+            return str(family_path / "coconut-u0.3")
         else:
-            return str(model_path / "cot/checkpoint_best")
+            return str(family_path / mode)
+
+    if mode == "cot":
+        if task == "prosqa" and family == "gpt2":
+            return str(family_path / "cot/best_checkpoint.pt")
+        else:
+            return str(family_path / "cot/checkpoint_best")
     if mode == "pause":
-        return str(model_path / "pause/checkpoint_best")
+        return str(family_path / "pause/checkpoint_best")
     if mode == "coconut":
-        return str(model_path / "coconut/checkpoint_best")
+        return str(family_path / "coconut/checkpoint_best")
     if mode == "coconut_u":
-        return str(model_path / "coconut-u0.3/checkpoint_best")
+        return str(family_path / "coconut-u0.3/checkpoint_best")
     raise ValueError(f"Unsupported mode: {mode}")
 
-def setup_model_and_tokenizer(task, mode, device):
+def setup_model_and_tokenizer(task, mode, device, family="gpt2"):
     """
-    Load GPT-2, add Coconut special tokens, wrap in Coconut class.
-
-    Loading order matters and differs by mode:
-
-    --mode base:
-        1. Load pretrained GPT-2.
-        2. Add special tokens, resize embeddings, init with "<<".
-        3. Wrap in Coconut.
-
-    --mode cot:
-        1. Load pretrained GPT-2.
-        2. Load CoT checkpoint (plain GPT-2 state dict, original vocab).
-        3. Add special tokens, resize embeddings, init with "<<".
-        4. Wrap in Coconut.
-
-    --mode coconut / coconut_u / pause:
-        1. Load pretrained GPT-2.
-        2. Add special tokens, resize embeddings, init with "<<".
-        3. Wrap in Coconut.
-        4. Load checkpoint (keys: base_causallm.*).
+    Load GPT-2 or Llama, add Coconut special tokens, wrap in Coconut class.
+    Handles PeftModel for Llama and standard state_dicts for GPT-2.
     """
-    checkpoint_path = get_checkpoint_path(task, mode)
+    import os
+    from src.config import BASE_GPT2, BASE_LLAMA
+    checkpoint_path = get_checkpoint_path(task, mode, family)
 
-    model = AutoModelForCausalLM.from_pretrained(BASE_GPT2)
-    tokenizer = AutoTokenizer.from_pretrained(BASE_GPT2)
-    tokenizer.pad_token = tokenizer.eos_token
+    # Full-FT Llama: checkpoint dir is a complete HF repo (resized vocab + trained
+    # latent-token embeddings baked in). Detected by presence of config.json and
+    # ABSENCE of adapter_config.json (which marks a LoRA adapter dir). Loaded directly
+    # as the model; base-model load, LoRA wrap, and resize/copy are all skipped.
+    llama_full_ft = False
+    if family == "llama" and mode != "base":
+        llama_full_ft = (
+            os.path.isdir(checkpoint_path)
+            and os.path.exists(os.path.join(checkpoint_path, "config.json"))
+            and not os.path.exists(os.path.join(checkpoint_path, "adapter_config.json"))
+        )
 
-    # --- CoT: load checkpoint BEFORE adding special tokens ---
-    if mode == "cot":
+    if family == "gpt2":
+        base_model_path = BASE_GPT2
+        model = AutoModelForCausalLM.from_pretrained(base_model_path)
+    elif family == "llama":
+        if llama_full_ft:
+            # tokenizer also from checkpoint: it carries the latent special tokens.
+            base_model_path = checkpoint_path
+            print(f"Loading Llama full-FT checkpoint: {checkpoint_path}")
+            model = AutoModelForCausalLM.from_pretrained(checkpoint_path, torch_dtype=torch.bfloat16)
+        else:
+            base_model_path = BASE_LLAMA
+            model = AutoModelForCausalLM.from_pretrained(base_model_path, torch_dtype=torch.bfloat16)
+    else:
+        raise ValueError(f"Unsupported model family: {family}")
+
+    tokenizer = AutoTokenizer.from_pretrained(base_model_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # --- CoT: load checkpoint BEFORE adding special tokens (GPT-2 only) ---
+    if mode == "cot" and family == "gpt2":
         print(f"Loading CoT checkpoint: {checkpoint_path}")
         state_dict = torch.load(checkpoint_path, map_location="cpu")
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -536,25 +606,62 @@ def setup_model_and_tokenizer(task, mode, device):
     start_id = tokenizer.convert_tokens_to_ids("<|start-latent|>")
     end_id = tokenizer.convert_tokens_to_ids("<|end-latent|>")
 
-    # Resize embeddings — run.py line 147
-    model.resize_token_embeddings(len(tokenizer))
+    # Resize embeddings + copy "<<" into the new <|latent|>/<|start-latent|>/<|end-latent|>
+    # slots. Llama cot is wrapped via LoRA whose adapter shapes target the *original*
+    # (un-resized) base vocab — so for cot we must resize AFTER the LoRA load. Other
+    # modes (gpt2 all, llama base, llama pause/coconut/coconut_u) can resize now.
+    def _resize_and_copy_target(m):
+        m.resize_token_embeddings(len(tokenizer))
+        embeddings = m.get_input_embeddings()
+        if family == "llama":
+            target_id = tokenizer.encode("<<", add_special_tokens=False)[0]
+        else:
+            target_id = tokenizer.convert_tokens_to_ids("<<")
+        lm_head = m.get_output_embeddings()
+        for token_id in [latent_id, start_id, end_id]:
+            embeddings.weight.data[token_id] = embeddings.weight.data[target_id].clone()
+            lm_head.weight.data[token_id] = lm_head.weight.data[target_id].clone()
 
-    # Initialize new token embeddings with "<<" — run.py lines 149-157
-    embeddings = model.get_input_embeddings()
-    target_id = tokenizer.convert_tokens_to_ids("<<")
-    for token_id in [latent_id, start_id, end_id]:
-        embeddings.weight.data[token_id] = embeddings.weight.data[target_id].clone()
-        model.lm_head.weight.data[token_id] = model.lm_head.weight.data[target_id].clone()
+    # Full-FT already carries resized embeddings + trained latent vectors: resizing or
+    # overwriting with the "<<" copy would clobber trained weights. Skip both.
+    resize_after_lora = (family == "llama" and mode == "cot" and not llama_full_ft)
+    if not resize_after_lora and not llama_full_ft:
+        _resize_and_copy_target(model)
 
-    # --- Wrap in Coconut (all modes) ---
+    # --- Llama LoRA Loading (skipped for full-FT) ---
+    if family == "llama" and mode != "base" and not llama_full_ft:
+        from peft import PeftModel
+        print(f"Loading Llama LoRA checkpoint: {checkpoint_path}")
+        model = PeftModel.from_pretrained(model, checkpoint_path, is_trainable=False)
+        # Sanity: confirm an adapter is active and has non-zero norm.
+        # Silent no-op load (e.g. due to PEFT version drift) is the suspected
+        # cause of CoT predictions looking identical to base Llama.
+        try:
+            active = getattr(model, "active_adapter", None)
+            lora_params = [(n, p) for n, p in model.named_parameters() if "lora_" in n]
+            total_norm = sum(p.detach().float().norm().item() ** 2 for _, p in lora_params) ** 0.5
+            print(f"  [LoRA] active_adapter={active}, "
+                  f"#lora_params={len(lora_params)}, total_norm={total_norm:.3f}")
+            if len(lora_params) == 0 or total_norm < 1e-6:
+                print("  [LoRA] WARNING: no LoRA params loaded or norm is ~0 — "
+                      "adapter likely not active. Predictions will mirror base.")
+        except Exception as e:
+            print(f"  [LoRA] sanity check failed: {e}")
+        if resize_after_lora:
+            _resize_and_copy_target(model)
+
+    # --- Wrap in Coconut (all modes, both families) ---
+    # Wrapping llama base/cot in Coconut mirrors the gpt2 base/cot setup used as the
+    # logit-lens control: the underlying HF model is still callable directly via
+    # `base_causallm`, and Coconut-specific code paths (pause_embedding, latent loop)
+    # are only invoked by experiments that explicitly need them.
     feedback_mode = "pause_curriculum" if mode == "pause" else "continuous"
     coconut_model = Coconut(model, latent_id, start_id, end_id,
                             tokenizer.eos_token_id,
                             feedback_mode=feedback_mode)
 
-
-    # --- Coconut/Pause: load checkpoint AFTER wrapping ---
-    if mode in ("pause", "coconut", "coconut_u"):
+    # --- Load checkpoint ---
+    if family == "gpt2" and mode in ("pause", "coconut", "coconut_u"):
         print(f"Loading Coconut checkpoint: {checkpoint_path}")
         raw_state_dict = torch.load(checkpoint_path, map_location="cpu")
         state_dict = clean_state_dict_keys(raw_state_dict)
@@ -572,7 +679,16 @@ def setup_model_and_tokenizer(task, mode, device):
         if unexpected:
             print(f"  Unexpected (first 5): {unexpected[:5]}")
 
+    elif family == "llama" and mode in ("pause", "coconut", "coconut_u"):
+        extra_state_path = os.path.join(checkpoint_path, "coconut_extras.pt")
+        if os.path.exists(extra_state_path):
+            print(f"Loading Coconut extras: {extra_state_path}")
+            extra_state = torch.load(extra_state_path, map_location="cpu")
+            coconut_model.load_state_dict(extra_state, strict=False)
+
     coconut_model = coconut_model.to(device)
+    if family == "llama":
+        coconut_model = coconut_model.to(torch.bfloat16)
     coconut_model.eval()
     base_model = coconut_model.base_causallm
 
@@ -582,7 +698,12 @@ def setup_model_and_tokenizer(task, mode, device):
 # Model loading: CODI
 # ═══════════════════════════════════════════════════════════════════
 
-def setup_codi_model(task, device, use_prj=True, prj_dim=768, remove_eos=True):
+def setup_codi_model(task, device, use_prj=True, prj_dim=None, remove_eos=True, family="gpt2"):
+    # prj_dim defaults: GPT-2 CODI ckpts use 768; Llama CODI ckpts use 2048
+    # (matches codiModel.TrainingArguments.prj_dim default of 2048 and the
+    # Llama-3.2-1B hidden_size). Pass explicitly to override.
+    if prj_dim is None:
+        prj_dim = 768 if family == "gpt2" else 2048
     """Load CODI model matching test.py configuration.
     
     Args:
@@ -590,16 +711,29 @@ def setup_codi_model(task, device, use_prj=True, prj_dim=768, remove_eos=True):
             format is [question] [bot] and the eot delimiter is [eot] only.
             If False, input is [question] [eos] [bot] and delimiter is [eot] [eos].
     """
-    if task == "gsm":
-        codi_dir = GSM_MODELS / "codi"
+    from src.config import BASE_GPT2, BASE_LLAMA
+    
+    if task == "prosqa":
+        model_path = PROSQA_MODELS
     else:
-        codi_dir = PROSQA_MODELS / "codi"
+        model_path = GSM_MODELS
+    
+    codi_dir = model_path / family / "codi"
+
+    if family == "gpt2":
+        base_model_path = str(BASE_GPT2)
+        tokenizer_path = "gpt2"
+    elif family == "llama":
+        base_model_path = str(BASE_LLAMA)
+        tokenizer_path = str(BASE_LLAMA)
+    else:
+        raise ValueError(f"Unsupported model family for CODI: {family}")
 
     model = AutoModelForCausalLM.from_pretrained(
-        str(BASE_GPT2), torch_dtype=torch.bfloat16,
+        base_model_path, torch_dtype=torch.bfloat16,
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        "gpt2", 
+        tokenizer_path, 
         use_fast=False,         # Match testing script
         padding_side="left",    # Match testing script
         model_max_length=1024   # Match testing script
@@ -610,16 +744,23 @@ def setup_codi_model(task, device, use_prj=True, prj_dim=768, remove_eos=True):
     eot_id = ori_vocab_size + 2
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     tokenizer.pad_token_id = ori_vocab_size 
-    hidden_size = model.config.n_embd
+    
+    hidden_size = getattr(model.config, "n_embd", getattr(model.config, "hidden_size", None))
 
     from peft import LoraConfig, TaskType, get_peft_model
+    
+    if family == "gpt2":
+        target_modules = ["c_attn", "c_proj", "c_fc"]
+    else:
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM, 
         inference_mode=True,
         r=128, 
         lora_alpha=32, 
         lora_dropout=0.1,
-        target_modules=["c_attn", "c_proj", "c_fc"], 
+        target_modules=target_modules, 
         init_lora_weights=True,
     )
     model = get_peft_model(model, lora_config)
@@ -658,8 +799,9 @@ def setup_codi_model(task, device, use_prj=True, prj_dim=768, remove_eos=True):
 
     if prj is not None and prj_sd:
         prj_local = {k[len("prj."):]: v for k, v in prj_sd.items()}
-        prj.load_state_dict(prj_local, strict=False)
-        print(f"[CODI] Projection: {len(prj_local)} keys loaded")
+        prj_missing, prj_unexpected = prj.load_state_dict(prj_local, strict=False)
+        print(f"[CODI] Projection: {len(prj_local)-len(prj_unexpected)} loaded, "
+              f"{len(prj_missing)} missing, {len(prj_unexpected)} unexpected")
 
     model.tie_weights()
     # CODI test.py: model.to(torch.bfloat16) — must match training precision
@@ -667,7 +809,11 @@ def setup_codi_model(task, device, use_prj=True, prj_dim=768, remove_eos=True):
     if prj is not None:
         prj = prj.to(device).to(torch.bfloat16).eval()
 
-    embedding_fn = model.get_base_model().transformer.wte
+    if family == "gpt2":
+        embedding_fn = model.get_base_model().transformer.wte
+    else:
+        embedding_fn = model.get_base_model().model.embed_tokens
+        
     lm_head_fn = model.get_base_model().lm_head
 
     return {

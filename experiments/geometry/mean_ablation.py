@@ -38,6 +38,9 @@ Usage
     # Multi-GPU
     python -m experiments.geometry.mean_ablation \
         --task prosqa --model coconut_u --intervention core --n_gpus 4
+    # Llama
+    python -m experiments.geometry.mean_ablation \
+        --task prosqa --model coconut_u --intervention core --model_family llama
 """
 
 import json
@@ -109,10 +112,16 @@ def deep_convert(obj):
 # Train-split statistics
 # ═══════════════════════════════════════════════════════════════════
 
-def load_train_thoughts(task, model):
-    path = THOUGHTS / task / f"thoughts_{model}_train.pt"
+def load_train_thoughts(task, model, family="gpt2"):
+    # Layout matches extract_thoughts.py / markovianity_test.py:
+    # THOUGHTS/<family>/<task>/thoughts_<model>_train.pt
+    path = THOUGHTS / family / task / f"thoughts_{model}_train.pt"
     if not path.exists():
-        raise FileNotFoundError(f"Train thoughts not found at {path}.")
+        raise FileNotFoundError(
+            f"Train thoughts not found at {path}. "
+            f"Run markovianity_test.py (extracts train thoughts) for "
+            f"--task {task} --model {model} --model_family {family}."
+        )
     blob = torch.load(path, map_location="cpu", weights_only=False)
     return blob["thoughts"]
 
@@ -356,7 +365,7 @@ def _shard_indices(n_items, world_size, rank):
     end = min(start + chunk, n_items)
     return list(range(start, end))
 
-def _build_ctx(rank, task, model_name, n_thoughts, random_seed):
+def _build_ctx(rank, task, model_name, n_thoughts, random_seed, family="gpt2"):
     """Per-worker model load on cuda:{rank}."""
     device = f"cuda:{rank}"
     torch.cuda.set_device(rank)
@@ -365,13 +374,13 @@ def _build_ctx(rank, task, model_name, n_thoughts, random_seed):
     if is_codi:
         ctx = {
             "is_codi": True,
-            "codi_dict": setup_codi_model(task, device),
+            "codi_dict": setup_codi_model(task, device, family=family),
             "n_thoughts": n_thoughts, "device": device, "task": task,
             "rank": rank, "random_seed": random_seed,
         }
     else:
         coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
-            setup_model_and_tokenizer(task, model_name, device)
+            setup_model_and_tokenizer(task, model_name, device, family=family)
         ctx = {
             "is_codi": False, "coconut_model": coconut_model,
             "base_model": base_model, "tokenizer": tokenizer,
@@ -382,16 +391,17 @@ def _build_ctx(rank, task, model_name, n_thoughts, random_seed):
     return ctx
 
 def _worker(rank, world_size, task, model_name, n_thoughts,
-            data, mu_t, mu, delta_norms, selection, random_seed, return_queue):
+            data, mu_t, mu, delta_norms, selection, random_seed, return_queue,
+            family="gpt2"):
     """Per-GPU worker. Processes its shard and returns partial counts."""
-    ctx = _build_ctx(rank, task, model_name, n_thoughts, random_seed)
+    ctx = _build_ctx(rank, task, model_name, n_thoughts, random_seed, family=family)
     indices = _shard_indices(len(data), world_size, rank)
     print(f"[rank {rank}] processing {len(indices)} instances on {ctx['device']}")
     partial = run_selected_on_shard(ctx, data, indices, mu_t, mu, delta_norms, selection)
     return_queue.put({"rank": rank, "partial": partial})
 
 def run_multigpu(task, model_name, n_thoughts, data, mu_t, mu, delta_norms,
-                 selection, random_seed, n_gpus):
+                 selection, random_seed, n_gpus, family="gpt2"):
     """Spawn n_gpus workers, each handling a contiguous shard."""
     ctx_mp = mp.get_context("spawn")
     q = ctx_mp.Queue()
@@ -400,7 +410,8 @@ def run_multigpu(task, model_name, n_thoughts, data, mu_t, mu, delta_norms,
         p = ctx_mp.Process(
             target=_worker,
             args=(rank, n_gpus, task, model_name, n_thoughts,
-                  data, mu_t, mu, delta_norms, selection, random_seed, q),
+                  data, mu_t, mu, delta_norms, selection, random_seed, q,
+                  family),
         )
         p.start()
         procs.append(p)
@@ -435,6 +446,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", choices=["prosqa", "gsm"], default="prosqa")
     parser.add_argument("--model", choices=["coconut", "coconut_u", "pause", "codi"], default="coconut_u")
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
+        help="Base model family. Threads through model loading and "
+             "namespaces the train-thoughts load path and outputs.",
+    )
     parser.add_argument("--n_thoughts", type=int, default=6)
     parser.add_argument("--max_instances", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
@@ -455,11 +471,11 @@ def main():
     set_seed(0)
 
     output_dir = Path(args.output_dir) if args.output_dir else \
-        BASE_DIR / "outputs" / "variance_matrix" / args.task / args.model
+        BASE_DIR / "outputs" / "variance_matrix" / args.model_family / args.task / args.model
     output_dir.mkdir(parents=True, exist_ok=True)
 
     data = load_data(args.task, args.max_instances)
-    train_thoughts = load_train_thoughts(args.task, args.model)
+    train_thoughts = load_train_thoughts(args.task, args.model, family=args.model_family)
     mu_t, mu, delta_norms = compute_temporal_stats(train_thoughts)
 
     # Build selection dict from --intervention.
@@ -472,25 +488,29 @@ def main():
         selection[name] = sel in ("all", "core", name)
 
     print("\n" + "="*50 + "\nVARIANCE DECOMPOSITION MATRIX\n" + "="*50)
-    print(f"  task={args.task}  model={args.model}  n_instances={len(data)}  "
+    print(f"  task={args.task}  model={args.model}  family={args.model_family}  "
+          f"n_instances={len(data)}  "
           f"n_gpus={args.n_gpus}  intervention={args.intervention}")
 
     if args.n_gpus > 1:
         # per_instance_vectors: {intervention_name: [is_correct_0, ..., is_correct_N]}
         per_instance_vectors = run_multigpu(
             args.task, args.model, args.n_thoughts, data, mu_t, mu, delta_norms,
-            selection, args.random_seed, args.n_gpus,
+            selection, args.random_seed, args.n_gpus, family=args.model_family,
         )
     else:
         # Single-GPU path
         is_codi = (args.model == "codi")
         if is_codi:
-            ctx = {"is_codi": True, "codi_dict": setup_codi_model(args.task, args.device),
+            ctx = {"is_codi": True,
+                   "codi_dict": setup_codi_model(args.task, args.device,
+                                                 family=args.model_family),
                    "n_thoughts": args.n_thoughts, "device": args.device, "task": args.task,
                    "rank": 0, "random_seed": args.random_seed}
         else:
             coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
-                setup_model_and_tokenizer(args.task, args.model, args.device)
+                setup_model_and_tokenizer(args.task, args.model, args.device,
+                                          family=args.model_family)
             ctx = {"is_codi": False, "coconut_model": coconut_model,
                    "base_model": base_model, "tokenizer": tokenizer,
                    "start_id": start_id, "latent_id": latent_id, "end_id": end_id,
@@ -510,6 +530,7 @@ def main():
     # computed from train_thoughts
     _ref_split = lambda name: "none" if name == "baseline" else "train"
     ci_ctx = {"task": args.task, "model": args.model,
+              "model_family": args.model_family,
               "intervention_run": args.intervention,
               "eval_split": "test",
               "n_train_for_reference": int(train_thoughts.shape[0]),
@@ -541,6 +562,7 @@ def main():
                 **ci_ctx, "intervention": name, "reference_split": _ref_split(name)})
 
     results = {"task": args.task, "model": args.model,
+               "model_family": args.model_family,
                "intervention_run": args.intervention,
                "n_instances": len(data), "n_gpus": args.n_gpus,
                **results_acc}

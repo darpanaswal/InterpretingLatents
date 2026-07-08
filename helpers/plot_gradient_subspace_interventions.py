@@ -12,15 +12,20 @@ Reads artefacts produced by gradient_subspace_interventions.py and emits:
        "point ± half-CI" endpoint annotations.
        Layout: (Graph-Hopping | Arithmetic-Reasoning) x (GRAD | Rand)
        One line per model {Pause, Coconut, Coconut_u, CODI}.
+       The full alpha sweep is shown, including the low-alpha points:
+         alpha=0   ablation (causal component removed) -- labelled
+         alpha=0.5 continuity point                    -- unlabelled
+         alpha=1   identity / no change                -- unlabelled
+       so the line is continuous from ablation through amplification.
 
   Appendix tables
   ---------------
-  2. tab_gradsubspace_ablation_stats.tex
-       Per-(task, model) bootstrap CIs + paired diffs + McNemar
-       for the ablation phase.
-  3. tab_gradsubspace_amp_stats.tex
-       Per-(task, model, alpha) bootstrap flip-rate CIs + paired
-       diffs + McNemar for the amplification phase.
+  2. tab_gradsubspace_stats.tex
+       Combined single file containing:
+       - Per-(task, model) bootstrap CIs + paired diffs + McNemar
+         for the ablation phase.
+       - Per-(task, model, alpha) bootstrap flip-rate CIs + paired
+         diffs + McNemar for the amplification phase.
 
 Source artefacts (per task/model under outputs/grad_subspace/):
   - ablation_results.json         (summary point estimates + CIs + McNemar p)
@@ -29,13 +34,13 @@ Source artefacts (per task/model under outputs/grad_subspace/):
 
 Usage
 -----
-    python gradient_subspace_intervention_tables.py
+    python -m helpers.plot_gradient_subspace_interventions
 
     # Dry-run: print every path probed and what was loaded.
-    python gradient_subspace_intervention_tables.py --debug
+    python -m helpers.plot_gradient_subspace_interventions --debug
 
-    # Override output directory:
-    python gradient_subspace_intervention_tables.py --out-dir results/grad_subspace
+    # Override output figure and tables directories:
+    python -m helpers.plot_gradient_subspace_interventions --out_fig results/figures/fig.pdf --out_tables_dir results/tables
 """
 
 import json
@@ -111,9 +116,9 @@ def load_jsonl(path: Path, debug: bool = False) -> list:
 # ── Record lookup ───────────────────────────────────────────────────────────
 
 def find_record(records: list, metric: str, context_match: dict = None):
-    """Return first record whose metric matches and (optional) _context fields agree."""
+    """Return the last (most recent) record whose metric matches and (optional) _context fields agree."""
     context_match = context_match or {}
-    for r in records:
+    for r in reversed(records):
         if r.get("metric") != metric:
             continue
         ctx = r.get("_context", {})
@@ -130,20 +135,22 @@ def fmt_pct(v, decimals=1) -> str:
 
 
 def ci_pct(r) -> str:
-    """BootstrapResult dict -> 'point [lo, hi]' as percentages."""
+    """BootstrapResult dict -> 'point \\pm half_ci' as percentages."""
     if r is None:
         return "--"
-    p, lo, hi = r["point"] * 100, r["ci_low"] * 100, r["ci_high"] * 100
-    return f"{p:.1f} [{lo:.1f}, {hi:.1f}]"
+    p = r["point"] * 100
+    hw = (r["ci_high"] - r["ci_low"]) * 100 / 2
+    return rf"${p:.1f} {{\scriptstyle \pm {hw:.1f}}}$"
 
 
 def diff_pct(r) -> str:
     """Signed paired-diff CI as percentages."""
     if r is None:
         return "--"
-    p, lo, hi = r["point"] * 100, r["ci_low"] * 100, r["ci_high"] * 100
+    p = r["point"] * 100
+    hw = (r["ci_high"] - r["ci_low"]) * 100 / 2
     sign = "+" if p >= 0 else ""
-    return f"{sign}{p:.1f} [{lo:.1f}, {hi:.1f}]"
+    return rf"${sign}{p:.1f} {{\scriptstyle \pm {hw:.1f}}}$"
 
 
 def fmt_mcnemar(r) -> str:
@@ -187,10 +194,13 @@ def _fmt_endpoint_pct(point_pct, ci_record, decimals=1):
 
 # ── Data collection ─────────────────────────────────────────────────────────
 
-def collect_ablation(debug: bool = False) -> dict:
+def collect_ablation(family: str = "gpt2", debug: bool = False) -> dict:
     """
     For each (task, model) load ablation_results.json and bootstrap_cis.jsonl.
     Returns: data[task][dir_name] = entry dict or None.
+
+    gradient_subspace_interventions.py writes
+    outputs/grad_subspace/<family>/<task>/<model>/.
 
     Note: ablation_results.json (written by gradient_subspace_interventions.py)
     contains the point estimates and the CIs as [low, high] lists; the McNemar
@@ -200,9 +210,9 @@ def collect_ablation(debug: bool = False) -> dict:
     for task, task_label in TASKS:
         data[task] = {}
         if debug:
-            print(f"\n-- ABLATION  {task_label} ({task}) --")
+            print(f"\n-- ABLATION  {task_label} ({task}) [{family}] --")
         for dir_name, _, _ in MODELS:
-            base = GRAD_SUBSPACE / task / dir_name
+            base = GRAD_SUBSPACE / family / task / dir_name
             if debug:
                 print(f"  model={dir_name}  base={base}")
 
@@ -217,8 +227,9 @@ def collect_ablation(debug: bool = False) -> dict:
             # we can present them uniformly via ci_pct / diff_pct / fmt_mcnemar.
             ci_orig = find_record(records, "baseline_accuracy",
                                   {"condition": "baseline"})
-            ci_grad = find_record(records, "grad_ablation_accuracy",
-                                  {"condition": "grad_ablation"})
+            ci_grad = (find_record(records, "grad_ablation_accuracy",
+                                   {"condition": "grad_nullspace"})
+                       or find_record(records, "grad_ablation_accuracy"))
             # Rand: prefer the pooled record; fall back to any rand_ablation.
             ci_rand = (find_record(records, "rand_ablation_accuracy",
                                    {"condition": "rand_ablation_pooled"})
@@ -246,10 +257,13 @@ def collect_ablation(debug: bool = False) -> dict:
     return data
 
 
-def collect_amplification(debug: bool = False) -> dict:
+def collect_amplification(family: str = "gpt2", debug: bool = False) -> dict:
     """
     For each (task, model) load amplification_results.json and bootstrap_cis.jsonl.
     Returns: amp[task][dir_name] = {"alphas", "raw", "records", "n"} or None.
+
+    gradient_subspace_interventions.py writes
+    outputs/grad_subspace/<family>/<task>/<model>/.
 
     amp_results.json layout (written by gradient_subspace_interventions.py):
       - alphas:                  list[float]
@@ -263,9 +277,9 @@ def collect_amplification(debug: bool = False) -> dict:
     for task, task_label in TASKS:
         amp[task] = {}
         if debug:
-            print(f"\n-- AMPLIFICATION  {task_label} ({task}) --")
+            print(f"\n-- AMPLIFICATION  {task_label} ({task}) [{family}] --")
         for dir_name, _, _ in MODELS:
-            base = GRAD_SUBSPACE / task / dir_name
+            base = GRAD_SUBSPACE / family / task / dir_name
             summary = load_json(base / "amplification_results.json", debug)
             records = load_jsonl(base / "bootstrap_cis.jsonl", debug)
             if summary is None:
@@ -400,7 +414,7 @@ def _panel_ylim(panel_data):
     return (max(-2, lo - 0.08 * span), min(108, hi + 0.32 * span))
 
 
-def _draw_panel(ax, panel_data_per_model, panel_title, alphas_grid,
+def _draw_panel(ax, panel_data_per_model, panel_title, alphas_grid, alpha_labels,
                 show_ylabel: bool):
     """
     panel_data_per_model: dict[dir_name -> {
@@ -415,7 +429,7 @@ def _draw_panel(ax, panel_data_per_model, panel_title, alphas_grid,
     flat = [(d["xs"], d["ys"]) for d in panel_data_per_model.values()]
     ymin, ymax = _panel_ylim(flat)
     y_range = ymax - ymin
-    min_gap = 0.13 * y_range
+    min_gap = 0.20 * y_range
     bottom_threshold = ymin + 0.08 * y_range
 
     # ── Plot lines ──────────────────────────────────────────────────────────
@@ -465,9 +479,9 @@ def _draw_panel(ax, panel_data_per_model, panel_title, alphas_grid,
         x_span = alphas_grid[-1] - alphas_grid[0]
     else:
         x_span = 1.0
-    line_extend = 0.18 * x_span    # length of leader line in data units
+    line_extend = 0.15 * x_span    # length of leader line in data units
     bend_short  = 0.05 * x_span    # short stub before the bend
-    bend_mid    = 0.13 * x_span    # midpoint of bend
+    bend_mid    = 0.11 * x_span    # midpoint of bend
 
     for y_val, _dir, x_val, color, ci_rec, label_y in staggered:
         x_pts = [x_val, x_val + bend_short, x_val + bend_mid, x_val + line_extend]
@@ -487,32 +501,93 @@ def _draw_panel(ax, panel_data_per_model, panel_title, alphas_grid,
             clip_on=False,
         )
 
+    # ── Ablation (alpha=0) labels on the LEFT of each line ──────────────────
+    # alpha=0 fully removes the causal component, so its flip rate is the
+    # gradient-/random-subspace ABLATION flip rate. We label it explicitly
+    # (mirroring the right-side amplification endpoint annotations) while
+    # leaving the alpha=0.5 and alpha=1 continuity points unlabelled.
+    abl_idx = next((i for i, lbl in enumerate(alpha_labels) if lbl == "0"), None)
+    abl_endpoints = []  # (y_at_abl, color, ci_rec_at_abl)
+    if abl_idx is not None:
+        for dir_name, _, _ in MODELS:
+            d = panel_data_per_model.get(dir_name)
+            if d is None or not d["xs"]:
+                continue
+            if abl_idx not in d["xs"]:
+                continue
+            j = d["xs"].index(abl_idx)
+            style = MODEL_STYLE[dir_name]
+            abl_endpoints.append((d["ys"][j], style["color"], d["ci_recs"][j]))
+
+    # Stagger ablation labels vertically, same scheme as the right endpoints.
+    abl_staggered = []
+    if abl_endpoints:
+        abl_endpoints.sort(key=lambda item: item[0])
+        placed_abl = []
+        for y_val, color, ci_rec in abl_endpoints:
+            label_y = max(y_val, bottom_threshold)
+            for py in placed_abl:
+                if abs(label_y - py) < min_gap:
+                    label_y = py + min_gap
+            label_y = min(label_y, label_cap)
+            placed_abl.append(label_y)
+            abl_staggered.append((y_val, color, ci_rec, label_y))
+
+        # Leader line bends to the LEFT of the alpha=0 marker.
+        x0 = float(abl_idx)
+        for y_val, color, ci_rec, label_y in abl_staggered:
+            x_pts = [x0, x0 - bend_short, x0 - bend_mid, x0 - line_extend]
+            y_pts = [y_val, y_val, label_y, label_y]
+            ax.plot(x_pts, y_pts, color=color, ls=(0, (1.2, 1.8)),
+                    linewidth=0.65, alpha=0.75, zorder=0)
+            ax.annotate(
+                _fmt_endpoint_pct(y_val, ci_rec, decimals=1),
+                xy=(x0 - line_extend, label_y),
+                xytext=(-3, 0),
+                textcoords="offset points",
+                fontsize=5.5,
+                color=color,
+                weight="bold",
+                ha="right",
+                va="center",
+                clip_on=False,
+            )
+
     # Extend ymax so the stacked label tower is fully inside the axes.
-    if staggered:
-        max_label_y = max(item[-1] for item in staggered)
+    label_towers = list(staggered) + [
+        (yv, None, None, ly) for (yv, _c, _ci, ly) in abl_staggered
+    ]
+    if label_towers:
+        max_label_y = max(item[-1] for item in label_towers)
         ymax = max(ymax, max_label_y + 0.05 * y_range)
     ax.set_ylim(ymin, ymax)
 
-    # X-axis: extend right so endpoint labels have room; left a touch in.
+    # X-axis: extend right for amplification endpoint labels and LEFT for the
+    # ablation labels.
     if alphas_grid:
-        ax.set_xlim(alphas_grid[0] - 0.04 * x_span,
-                    alphas_grid[-1] + line_extend + 0.30 * x_span)
+        left_pad = (line_extend + 0.36 * x_span) if abl_staggered else (0.04 * x_span)
+        ax.set_xlim(alphas_grid[0] - left_pad,
+                    alphas_grid[-1] + line_extend + 0.40 * x_span)
         ax.set_xticks(alphas_grid)
-        ax.set_xticklabels([fmt_alpha(a) for a in alphas_grid])
+        ax.set_xticklabels(alpha_labels)
 
-    ax.set_xlabel(r"$\alpha$")
+    ax.set_xlabel(r"$\alpha$ (amplification constant)")
     if show_ylabel:
         ax.set_ylabel("Flip rate (%)")
     ax.set_title(panel_title, fontsize=8, pad=6)
 
 
-def build_amplification_lineplot(amp: dict, out_pdf: Path, out_png: Path):
+def build_amplification_lineplot(amp: dict, out_pdf: Path):
     """
     Four panels:
       (a) Graph-Hopping  / GRAD     (b) Graph-Hopping  / Rand
       (c) Arithmetic-Reasoning / GRAD   (d) Arithmetic-Reasoning / Rand
     """
-    # Union of alphas (excluding the alpha=1.0 identity sanity check).
+    # Union of all swept alphas, including the low-alpha continuity points:
+    #   alpha=0   -> ablation (causal component fully removed)
+    #   alpha=0.5 -> continuity point between ablation and identity
+    #   alpha=1   -> identity / no-change
+    #   alpha>1   -> amplification
     all_alphas = set()
     for task, _ in TASKS:
         for dir_name, _, _ in MODELS:
@@ -520,12 +595,14 @@ def build_amplification_lineplot(amp: dict, out_pdf: Path, out_png: Path):
             if entry is None:
                 continue
             for a in entry["alphas"]:
-                if abs(a - 1.0) > 1e-6:
-                    all_alphas.add(a)
+                all_alphas.add(a)
     alphas_grid = sorted(all_alphas)
     if not alphas_grid:
-        print("[WARN] No alphas (other than 1.0) found; skipping lineplot.")
+        print("[WARN] No alphas found; skipping lineplot.")
         return
+
+    alpha_labels = [fmt_alpha(a) for a in alphas_grid]
+    alpha_indices = list(range(len(alphas_grid)))
 
     # Assemble panel data: for each (task, condition), build per-model xs/ys/ci.
     panels = {}      # (task, condition) -> dict[dir_name -> {xs, ys, ci_recs}]
@@ -548,7 +625,7 @@ def build_amplification_lineplot(amp: dict, out_pdf: Path, out_png: Path):
                         continue
                     g_rec, r_rec, _d, _m = get_amp_ci(entry["raw"], a)
                     ci_rec = g_rec if cond == "grad" else r_rec
-                    xs.append(a)
+                    xs.append(alphas_grid.index(a))
                     ys.append(rate * 100.0)
                     ci_recs.append(ci_rec)
                 panel[dir_name] = {"xs": xs, "ys": ys, "ci_recs": ci_recs}
@@ -556,8 +633,8 @@ def build_amplification_lineplot(amp: dict, out_pdf: Path, out_png: Path):
 
     # ── Figure layout: 2 rows (tasks) x 2 cols (conditions) ─────────────────
     fig, axes = plt.subplots(
-        2, 2, figsize=(9.5, 4.0),
-        gridspec_kw={"wspace": 0.42, "hspace": 0.55},
+        2, 2, figsize=(9.0, 3.2),
+        gridspec_kw={"wspace": 0.15, "hspace": 0.60},
     )
 
     panel_specs = [
@@ -568,74 +645,59 @@ def build_amplification_lineplot(amp: dict, out_pdf: Path, out_png: Path):
     ]
 
     for ax, key, title, show_yl in panel_specs:
-        _draw_panel(ax, panels[key], title, alphas_grid, show_ylabel=show_yl)
+        _draw_panel(ax, panels[key], title, alpha_indices, alpha_labels, show_ylabel=show_yl)
 
-    # Single legend below all four panels.
+    # Single legend in the right margin (vertical), reclaiming the vertical
+    # space the old below-panel bar consumed.
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
         fig.legend(
             handles, labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.02),
-            ncol=len(labels),
+            loc="center left",
+            bbox_to_anchor=(0.92, 0.5),
+            ncol=1,
             fontsize=6,
             frameon=True,
             framealpha=0.8,
             edgecolor="#cccccc",
             handlelength=2.0,
-            columnspacing=1.2,
+            labelspacing=0.8,
             handletextpad=0.5,
         )
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf, bbox_inches="tight")
-    fig.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"[OK] Lineplot PDF -> {out_pdf.resolve()}")
-    print(f"[OK] Lineplot PNG -> {out_png.resolve()}")
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # Appendix table 1: Ablation statistical tests
 # ────────────────────────────────────────────────────────────────────────────
 
-def build_ablation_stats_table(data: dict) -> str:
+def build_ablation_stats_table(data: dict, family: str = "") -> str:
     lines = [
-        r"\subsection{Gradient-Subspace Ablation (Experiment~2, Part~1)}",
-        r"\label{app:gradsubspace_ablation_stats}",
-        "",
-        r"Point estimates and 95\% bootstrap CIs (10{,}000 percentile resamples) "
-        r"for accuracy under three conditions: original thought vectors "
-        r"(\textsc{Orig}), gradient-subspace ablated (\textsc{Grad}), and "
-        r"random-subspace ablated (\textsc{Rand}, pooled across $K$ random "
-        r"seeds). "
-        r"$\Delta_{\text{grad}} = \text{Acc}_{\text{orig}} - "
-        r"\text{Acc}_{\text{grad}}$ "
-        r"(positive = gradient ablation hurts). "
-        r"McNemar $p$ is exact two-sided binomial on discordant pairs "
-        r"($b$: correct only under \textsc{Orig}; $c$: correct only under the "
-        r"ablated condition).",
-        "",
+        r"\begin{table}[h!]",
+        r"\centering",
+        r"\small",
+        r"\setlength{\tabcolsep}{3pt}",
+        r"\begin{tabular}{l ccc cc cc c}",
+        r"\toprule",
+        (r"Model "
+         r"& Acc$_{\text{orig}}$ [\% CI] "
+         r"& Acc$_{\text{grad}}$ [\% CI] "
+         r"& Acc$_{\text{rand}}$ [\% CI] "
+         r"& $\Delta_{\text{grad}}$ [\% CI] "
+         r"& McNemar$_{\text{grad}}$ $p$ "
+         r"& $\Delta_{\text{rand}}$ [\% CI] "
+         r"& McNemar$_{\text{rand}}$ $p$ "
+         r"& $n$ \\"),
     ]
 
     for task, task_label in TASKS:
         lines += [
-            r"\begin{table}[h!]",
-            r"\centering",
-            r"\small",
-            r"\setlength{\tabcolsep}{3pt}",
-            r"\caption{Gradient-subspace ablation: " + task_label + r".}",
-            r"\begin{tabular}{l ccc cc cc c}",
-            r"\toprule",
-            (r"Model "
-             r"& Acc$_{\text{orig}}$ [\% CI] "
-             r"& Acc$_{\text{grad}}$ [\% CI] "
-             r"& Acc$_{\text{rand}}$ [\% CI] "
-             r"& $\Delta_{\text{grad}}$ [\% CI] "
-             r"& McNemar$_{\text{grad}}$ $p$ "
-             r"& $\Delta_{\text{rand}}$ [\% CI] "
-             r"& McNemar$_{\text{rand}}$ $p$ "
-             r"& $n$ \\"),
+            r"\midrule",
+            rf"\multicolumn{{9}}{{c}}{{\textbf{{{task_label}}}}} \\",
             r"\midrule",
         ]
 
@@ -658,18 +720,15 @@ def build_ablation_stats_table(data: dict) -> str:
                 f"{entry['n'] or '--'} \\\\"
             )
 
-        lines += [
-            r"\bottomrule",
-            r"\end{tabular}",
-            r"\label{tab:gradsubspace_ablation_stats_" + task + r"}",
-            r"\end{table}",
-            "",
-        ]
-
-    lines.append(
-        r"\noindent$^{*}p{<}0.05$,\quad $^{**}p{<}0.01$,\quad "
-        r"$^{***}p{<}0.001$ (exact two-sided McNemar)."
-    )
+    lines += [
+        r"\bottomrule",
+        r"\end{tabular}",
+        rf"\caption{{Gradient-subspace ablation statistical tests ({family}). "
+        r"$^{*}p{<}0.05$, $^{**}p{<}0.01$, $^{***}p{<}0.001$ "
+        r"(exact two-sided McNemar).}",
+        rf"\label{{tab:gradsubspace_ablation_stats_{family}}}",
+        r"\end{table}",
+    ]
     return "\n".join(lines).strip()
 
 
@@ -677,93 +736,89 @@ def build_ablation_stats_table(data: dict) -> str:
 # Appendix table 2: Amplification statistical tests (full per-α grid)
 # ────────────────────────────────────────────────────────────────────────────
 
-def build_amp_stats_table(amp: dict) -> str:
+def build_amp_stats_table(amp: dict, family: str = "") -> str:
     lines = [
-        r"\subsection{Gradient-Subspace Amplification (Experiment~2, Part~2)}",
-        r"\label{app:gradsubspace_amp_stats}",
-        "",
-        r"Per-$\alpha$ flip-rate 95\% bootstrap CIs (10{,}000 resamples). "
-        r"A \emph{flip} is recorded when the model's normalised output text "
-        r"changes relative to the unintervened baseline. "
-        r"$\Delta = \text{flip}_{\text{grad}} - \text{flip}_{\text{rand}}$ "
-        r"(positive = the gradient subspace causes more flips than a "
-        r"rank-matched random control, pooled across $K$ random seeds). "
-        r"McNemar $p$ tests whether \textsc{Grad} and \textsc{Rand} flip the "
-        r"\emph{same instances}. "
-        r"The $\alpha=1$ identity sanity check is omitted.",
-        "",
+        r"\begin{table}[h!]",
+        r"\centering",
+        r"\tiny",
+        r"\setlength{\tabcolsep}{3pt}",
+        r"\begin{tabular}{l l | cccc c | cccc c}",
+        r"\toprule",
+        r"& & \multicolumn{5}{c}{Graph-Hopping} & \multicolumn{5}{c}{Arithmetic-Reasoning} \\",
+        r"\cmidrule(lr){3-7} \cmidrule(lr){8-12}",
+        (r"Model & $\alpha$ "
+         r"& Flip$_{\text{grad}}$ [\% CI] "
+         r"& Flip$_{\text{rand}}$ [\% CI] "
+         r"& $\Delta$ [\% CI] "
+         r"& McNemar $p$ "
+         r"& $n$ "
+         r"& Flip$_{\text{grad}}$ [\% CI] "
+         r"& Flip$_{\text{rand}}$ [\% CI] "
+         r"& $\Delta$ [\% CI] "
+         r"& McNemar $p$ "
+         r"& $n$ \\"),
+        r"\midrule",
     ]
 
-    for task, task_label in TASKS:
-        lines += [
-            r"\begin{table}[h!]",
-            r"\centering",
-            r"\small",
-            r"\setlength{\tabcolsep}{3pt}",
-            r"\caption{Gradient-subspace amplification flip-rate statistics: "
-            + task_label + r".}",
-            r"\begin{tabular}{l l cccc c}",
-            r"\toprule",
-            (r"Model & $\alpha$ "
-             r"& Flip$_{\text{grad}}$ [\% CI] "
-             r"& Flip$_{\text{rand}}$ [\% CI] "
-             r"& $\Delta$ [\% CI] "
-             r"& McNemar $p$ "
-             r"& $n$ \\"),
-            r"\midrule",
-        ]
-
-        for dir_name, col_label, _ in MODELS:
+    for i, (dir_name, col_label, _) in enumerate(MODELS):
+        alphas_set = set()
+        for task, _ in TASKS:
             entry = amp[task].get(dir_name)
-            if entry is None:
-                lines.append(f"{col_label} & -- & -- & -- & -- & -- & -- \\\\")
-                lines.append(r"\midrule")
-                continue
-
-            display_alphas = [a for a in entry["alphas"] if abs(a - 1.0) > 1e-6]
-            first_row = True
-            for a in display_alphas:
-                # Prefer JSONL records (carry McNemar b/c counts).
-                g_jl, r_jl, d_jl, m_jl = get_amp_jsonl_records(entry["records"], a)
-                # Fall back to amp_results.json reconstructions.
-                g_fb, r_fb, d_fb, m_fb = get_amp_ci(entry["raw"], a)
-
-                g = g_jl or g_fb
-                r = r_jl or r_fb
-                d = d_jl or d_fb
-                m = m_jl or m_fb
-
-                model_cell = col_label if first_row else ""
-                n_cell     = (str(entry["n"])
-                              if (first_row and entry["n"] is not None) else "")
-                first_row  = False
-
-                lines.append(
-                    f"{model_cell} & {fmt_alpha(a)} & "
-                    f"{ci_pct(g)} & "
-                    f"{ci_pct(r)} & "
-                    f"{diff_pct(d)} & "
-                    f"{fmt_mcnemar(m)} & "
-                    f"{n_cell} \\\\"
-                )
+            if entry is not None:
+                alphas_set.update(a for a in entry["alphas"] if a >= 1.5)
+        
+        display_alphas = sorted(alphas_set)
+        if not display_alphas:
+            lines.append(f"{col_label} & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\\\")
             lines.append(r"\midrule")
+            continue
 
-        if lines and lines[-1] == r"\midrule":
-            lines.pop()
+        first_row = True
+        for a in display_alphas:
+            row_parts = []
+            
+            model_cell = col_label if first_row else ""
+            row_parts.append(model_cell)
+            row_parts.append(fmt_alpha(a))
+            
+            for task, _ in TASKS:
+                entry = amp[task].get(dir_name)
+                if entry is None or a not in entry["alphas"]:
+                    row_parts.extend(["--", "--", "--", "--", "--"])
+                else:
+                    g_jl, r_jl, d_jl, m_jl = get_amp_jsonl_records(entry["records"], a)
+                    g_fb, r_fb, d_fb, m_fb = get_amp_ci(entry["raw"], a)
 
-        lines += [
-            r"\bottomrule",
-            r"\end{tabular}",
-            r"\label{tab:gradsubspace_amp_stats_" + task + r"}",
-            r"\end{table}",
-            "",
-        ]
+                    g = g_jl or g_fb
+                    r = r_jl or r_fb
+                    d = d_jl or d_fb
+                    m = m_jl or m_fb
+                    
+                    n_val = entry["n"] if first_row else ""
+                    
+                    row_parts.append(ci_pct(g))
+                    row_parts.append(ci_pct(r))
+                    row_parts.append(diff_pct(d))
+                    row_parts.append(fmt_mcnemar(m))
+                    row_parts.append(str(n_val))
 
-    lines.append(
-        r"\noindent$^{*}p{<}0.05$,\quad $^{**}p{<}0.01$,\quad "
-        r"$^{***}p{<}0.001$ (exact two-sided McNemar on per-instance flip "
-        r"indicators)."
-    )
+            lines.append(" & ".join(row_parts) + r" \\")
+            first_row = False
+            
+        lines.append(r"\midrule")
+
+    if lines and lines[-1] == r"\midrule":
+        lines.pop()
+
+    lines += [
+        r"\bottomrule",
+        r"\end{tabular}",
+        rf"\caption{{Gradient-subspace amplification flip-rate statistics ({family}). "
+        r"$^{*}p{<}0.05$, $^{**}p{<}0.01$, $^{***}p{<}0.001$ "
+        r"(exact two-sided McNemar on per-instance flip indicators).}",
+        rf"\label{{tab:gradsubspace_amp_stats_{family}}}",
+        r"\end{table}",
+    ]
     return "\n".join(lines).strip()
 
 
@@ -771,13 +826,35 @@ def build_amp_stats_table(amp: dict) -> str:
 # Entry point
 # ────────────────────────────────────────────────────────────────────────────
 
+def discover_families() -> list:
+    """Families present on disk under grad_subspace/<family>/."""
+    found = set()
+    if GRAD_SUBSPACE.is_dir():
+        for child in GRAD_SUBSPACE.iterdir():
+            if child.is_dir() and child.name != "figures":
+                found.add(child.name)
+    known = [f for f in ("gpt2", "llama") if f in found]
+    extra = sorted(found - set(known))
+    return known + extra
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "--out-dir", type=Path,
-        default=GRAD_SUBSPACE / "tables",
-        help="Output directory for figure + appendix tables "
-             "(default: outputs/grad_subspace/tables)",
+        "--model_family", choices=["gpt2", "llama"], default=None,
+        help="Restrict to one family. Default: loop all families found "
+             "under outputs/grad_subspace/.",
+    )
+    ap.add_argument(
+        "--out_fig_dir", type=Path,
+        default="Plots/gradient_subspace_interventions",
+        help="Directory for per-family line figures "
+             "(default: Plots/gradient_subspace_interventions)",
+    )
+    ap.add_argument(
+        "--out_tables_dir", type=Path,
+        default=Path("Tables/statistical"),
+        help="Output directory for appendix tables (default: Tables/statistical/)",
     )
     ap.add_argument(
         "--debug", action="store_true",
@@ -785,48 +862,47 @@ def main():
     )
     args = ap.parse_args()
 
-    abl_data = collect_ablation(debug=args.debug)
-    amp_data = collect_amplification(debug=args.debug)
-
-    if args.debug:
-        print("\n-- Ablation summary --")
-        for task, models in abl_data.items():
-            for m, e in models.items():
-                ok = "None" if e is None else (
-                    f"orig={e['orig']}, grad={e['grad']}, rand={e['rand']}, n={e['n']}"
-                )
-                print(f"  {task}/{m}: {ok}")
-        print("\n-- Amplification summary --")
-        for task, models in amp_data.items():
-            for m, e in models.items():
-                ok = "None" if e is None else f"{len(e['alphas'])} alphas, n={e['n']}"
-                print(f"  {task}/{m}: {ok}")
+    families = ([args.model_family] if args.model_family else discover_families())
+    if not families:
+        print(f"[WARN] No families found under {GRAD_SUBSPACE}")
         return
+    print(f"[INFO] Families: {families}")
 
-    out = args.out_dir
-    out.mkdir(parents=True, exist_ok=True)
+    out_tables = args.out_tables_dir
+    out_fig_dir = args.out_fig_dir
+    out_tables.mkdir(parents=True, exist_ok=True)
+    out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-    # Main-text figure.
-    build_amplification_lineplot(
-        amp_data,
-        out / "fig_amplification_lineplot.pdf",
-        out / "fig_amplification_lineplot.png",
-    )
+    for family in families:
+        abl_data = collect_ablation(family=family, debug=args.debug)
+        amp_data = collect_amplification(family=family, debug=args.debug)
 
-    # Appendix tables.
-    abl_stats = build_ablation_stats_table(abl_data)
-    p = out / "tab_gradsubspace_ablation_stats.tex"
-    p.write_text(abl_stats)
-    print(f"[OK] Ablation appendix table   -> {p.resolve()}")
+        if args.debug:
+            print(f"\n-- Ablation summary [{family}] --")
+            for task, models in abl_data.items():
+                for m, e in models.items():
+                    ok = "None" if e is None else (
+                        f"orig={e['orig']}, grad={e['grad']}, rand={e['rand']}, n={e['n']}"
+                    )
+                    print(f"  {task}/{m}: {ok}")
+            print(f"\n-- Amplification summary [{family}] --")
+            for task, models in amp_data.items():
+                for m, e in models.items():
+                    ok = "None" if e is None else f"{len(e['alphas'])} alphas, n={e['n']}"
+                    print(f"  {task}/{m}: {ok}")
+            continue
 
-    amp_stats = build_amp_stats_table(amp_data)
-    p = out / "tab_gradsubspace_amp_stats.tex"
-    p.write_text(amp_stats)
-    print(f"[OK] Amplification appendix    -> {p.resolve()}")
+        # Main-text figure (namespaced by family).
+        out_fig = out_fig_dir / f"amplification_{family}.pdf"
+        build_amplification_lineplot(amp_data, out_fig)
 
-    sep = "=" * 70
-    print(f"\n{sep}\nABLATION APPENDIX TABLE\n{sep}\n{abl_stats}")
-    print(f"\n{sep}\nAMPLIFICATION APPENDIX TABLE\n{sep}\n{amp_stats}")
+        # Appendix tables — one combined file per family.
+        abl_stats = build_ablation_stats_table(abl_data, family=family)
+        amp_stats = build_amp_stats_table(amp_data, family=family)
+        combined_stats = abl_stats + "\n\n" + amp_stats
+        p = out_tables / f"gradient_subspace_interventions_{family}.tex"
+        p.write_text(combined_stats)
+        print(f"[OK] Appendix tables -> {p.resolve()}")
 
 
 if __name__ == "__main__":

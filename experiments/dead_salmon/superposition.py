@@ -37,6 +37,7 @@ Usage:
     python -m experiments.dead_salmon.superposition --mode codi
 """
 
+import copy
 import math
 import json
 import torch
@@ -137,8 +138,9 @@ def get_candidates_at_depth_k(instance, k):
 # PATH HELPERS
 # ============================================================================
 
-def get_output_path(mode):
-    output_dir = CONTROL_EXPT
+def get_output_path(mode, family="gpt2"):
+    # Namespace by family so gpt2 and llama runs don't clobber each other.
+    output_dir = CONTROL_EXPT / family
     output_dir.mkdir(parents=True, exist_ok=True)
 
     return str(output_dir / f"results_{mode}.json")
@@ -244,7 +246,7 @@ def prepare_dataset_for_k(base_dataset, k, start_id, latent_id, end_id):
 def probe_concept_probs_pauseaware(
     coconut_model, tokenizer, input_ids, candidates, device, k,
     start_id=None, latent_id=None, end_id_tok=None, sample=None,
-    codi_dict=None,
+    codi_dict=None, base_model_override=None,
 ):
     """
     Probe concept probabilities after k thoughts.
@@ -341,13 +343,19 @@ def probe_concept_probs_pauseaware(
 
     else:
         pause = is_pause_model(coconut_model)
-        base_model = coconut_model.base_causallm
-        embedding = coconut_model.embedding
+        if coconut_model is None:
+            # Llama base/cot: no Coconut wrapper exists
+            base_model = base_model_override
+            embedding = base_model.get_input_embeddings()
+        else:
+            base_model = coconut_model.base_causallm
+            embedding = coconut_model.embedding
 
         if pause:
             # Build input with pause embeddings for k thoughts
+            from src.utils import tokenize_question_for_recurrence
             question_text = sample["question"]
-            question_tokens = tokenizer.encode(question_text + "\n", add_special_tokens=True)
+            question_tokens = tokenize_question_for_recurrence(tokenizer, question_text)
 
             input_ids_list = (
                 question_tokens
@@ -376,21 +384,39 @@ def probe_concept_probs_pauseaware(
             current_pos = inputs_embeds.shape[1]
 
         else:
-            # Coconut: use forward() for recurrence, then get KV cache
-            attention_mask = torch.ones_like(input_ids, device=device)
-            labels = input_ids.clone()
-            position_ids = torch.arange(
-                0, input_ids.shape[1], dtype=torch.long, device=device
-            ).unsqueeze(0)
+            if coconut_model is None:
+                # Llama base/cot: no recurrence; feed input_ids directly.
+                # Vocab not resized (utils.py:549), so latent/start/end token ids
+                # are out of range. Substitute "<<" id to match Coconut-mode init.
+                sub_id = tokenizer.encode("<<", add_special_tokens=False)[0]
+                feed_ids = input_ids.clone()
+                for sid in (start_id, latent_id, end_id_tok):
+                    if sid is not None:
+                        feed_ids[feed_ids == sid] = sub_id
+                attention_mask = torch.ones_like(feed_ids, device=device)
+                full_outputs = base_model(
+                    input_ids=feed_ids,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                )
+                kv_cache = full_outputs.past_key_values
+                current_pos = feed_ids.shape[1]
+            else:
+                # Coconut: use forward() for recurrence, then get KV cache
+                attention_mask = torch.ones_like(input_ids, device=device)
+                labels = input_ids.clone()
+                position_ids = torch.arange(
+                    0, input_ids.shape[1], dtype=torch.long, device=device
+                ).unsqueeze(0)
 
-            outputs = coconut_model.forward(
-                input_ids, attention_mask, labels, position_ids
-            )
-            inputs_embeds_out = outputs.inputs_embeds
+                outputs = coconut_model.forward(
+                    input_ids, attention_mask, labels, position_ids
+                )
+                inputs_embeds_out = outputs.inputs_embeds
 
-            full_outputs = base_model(inputs_embeds=inputs_embeds_out, use_cache=True)
-            kv_cache = full_outputs.past_key_values
-            current_pos = inputs_embeds_out.shape[1]
+                full_outputs = base_model(inputs_embeds=inputs_embeds_out, use_cache=True)
+                kv_cache = full_outputs.past_key_values
+                current_pos = inputs_embeds_out.shape[1]
 
     # From here, probing is identical for both models
     prefix_tokens = tokenizer.encode(" Every", add_special_tokens=False)
@@ -423,7 +449,7 @@ def probe_concept_probs_pauseaware(
         log_p = math.log(p_first + 1e-30)
 
         if len(c_tokens) > 1:
-            concept_cache = tuple((k_.clone(), v_.clone()) for k_, v_ in kv_cache)
+            concept_cache = copy.deepcopy(kv_cache)
             concept_pos = current_pos
 
             for i in range(len(c_tokens) - 1):
@@ -457,15 +483,15 @@ def run_experiment(args):
     is_codi = (args.mode == "codi")
 
     if is_codi:
-        codi_dict = setup_codi_model(args.task, device)
+        codi_dict = setup_codi_model(args.task, device, family=args.model_family)
         tokenizer = codi_dict['tokenizer']
         checkpoint_path = str(codi_dict.get('checkpoint_path', 'codi'))
         coconut_model = None
         start_id = latent_id = end_id = None
     else:
         codi_dict = None
-        coconut_model, _, tokenizer, latent_id, start_id, end_id, checkpoint_path = \
-            setup_model_and_tokenizer(args.task, args.mode, device)
+        coconut_model, base_model_raw, tokenizer, latent_id, start_id, end_id, checkpoint_path = \
+            setup_model_and_tokenizer(args.task, args.mode, device, family=args.model_family)
 
     print(f"Loading data: {PROSQA_TEST}")
     with open(PROSQA_TEST) as f:
@@ -476,7 +502,7 @@ def run_experiment(args):
 
     num_samples = min(args.num_samples, len(raw_data))
     max_k = args.max_thoughts
-    output_path = get_output_path(args.mode)
+    output_path = get_output_path(args.mode, family=args.model_family)
 
     print(f"Samples: {num_samples}, max thoughts: {max_k}")
     print(f"Output path: {output_path}\n")
@@ -511,6 +537,7 @@ def run_experiment(args):
                 start_id=start_id, latent_id=latent_id,
                 end_id_tok=end_id, sample=instance,
                 codi_dict=codi_dict,
+                base_model_override=(base_model_raw if not is_codi and coconut_model is None else None),
             )
 
             metrics = compute_metrics(concept_probs, candidates)
@@ -534,20 +561,21 @@ def run_experiment(args):
                     f"correct={metrics['top1_is_correct']} | {top3_str}"
                 )
 
+    family_label = {"gpt2": "GPT-2", "llama": "Llama"}[args.model_family]
     MODE_LABELS = {
-        "base": "Base GPT-2 (no training)",
-        "cot": "CoT-finetuned GPT-2 (no recurrence training)",
-        "pause": "GPT-2 finetuned with pause tokens",
-        "coconut": "Coconut-trained GPT-2 (u=0.0)",
-        "coconut_u": "Coconut-trained GPT-2 (u=0.3)",
-        "codi": "CODI (latent distillation)",
+        "base":      f"Base {family_label} (no training)",
+        "cot":       f"CoT-finetuned {family_label} (no recurrence training)",
+        "pause":     f"{family_label} finetuned with pause tokens",
+        "coconut":   f"Coconut-trained {family_label} (u=0.0)",
+        "coconut_u": f"Coconut-trained {family_label} (u=0.3)",
+        "codi":      f"CODI on {family_label} (latent distillation)",
     }
     print("\n" + "=" * 70)
     print(f"AGGREGATE — {MODE_LABELS[args.mode]}")
     print("=" * 70)
 
     # ── Bootstrap CI output paths ──
-    ci_dir = CONTROL_EXPT / "ci"
+    ci_dir = CONTROL_EXPT / args.model_family / "ci"
     ci_dir.mkdir(parents=True, exist_ok=True)
     cis_jsonl = str(ci_dir / f"superposition_{args.mode}.jsonl")
     # Clear stale records from previous runs
@@ -635,6 +663,7 @@ def run_experiment(args):
     output = {
         "experiment": "superposition_control",
         "mode": args.mode,
+        "model_family": args.model_family,
         "checkpoint": checkpoint_path,
         "data_path": str(PROSQA_TEST),
         "num_samples": num_samples,
@@ -670,6 +699,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", choices=["prosqa", "gsm"], default="prosqa")
     parser.add_argument("--mode", choices=["base", "cot", "pause", "coconut", "coconut_u", "codi"], default="base")
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
+        help="Base model family. Determines checkpoint paths and dtype.",
+    )
     parser.add_argument("--num_samples", type=int, default=500)
     parser.add_argument("--max_thoughts", type=int, default=6)
     args = parser.parse_args()

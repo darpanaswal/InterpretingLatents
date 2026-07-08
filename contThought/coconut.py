@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from collections import namedtuple
 from transformers.models.gpt2 import GPT2LMHeadModel
+from transformers.cache_utils import DynamicCache
 
 Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
 MAX_N_LATENT = 8
@@ -146,7 +147,9 @@ class Coconut(nn.Module):
                     position_ids=position_ids[
                         :, next_compute_range[0] : next_compute_range[1]
                     ],
-                    past_key_values=past_key_values,
+                    past_key_values=DynamicCache.from_legacy_cache(
+                        tuple(past_key_values)
+                    ),
                     output_hidden_states=True,
                 )
 
@@ -167,6 +170,10 @@ class Coconut(nn.Module):
                 -1
             ]  # Get the last layer hidden states
             kv_cache = outputs.past_key_values
+            # transformers >=4.x returns a Cache object; convert to legacy
+            # list-of-tuples [(k, v), ...] so the slicing logic below works.
+            if kv_cache is not None and not isinstance(kv_cache, (list, tuple)):
+                kv_cache = kv_cache.to_legacy_cache()
 
             # feedback the continuous thoughts to the input_embeds
 
@@ -218,13 +225,15 @@ class Coconut(nn.Module):
             attention_mask=attention_mask[:, : next_compute_range[1]],
             position_ids=position_ids[:, next_compute_range[0] : next_compute_range[1]],
             past_key_values=(
-                [
-                    (
-                        k[:, :, : next_compute_range[0], :],
-                        v[:, :, : next_compute_range[0], :],
+                DynamicCache.from_legacy_cache(
+                    tuple(
+                        (
+                            k[:, :, : next_compute_range[0], :],
+                            v[:, :, : next_compute_range[0], :],
+                        )
+                        for k, v in kv_cache
                     )
-                    for k, v in kv_cache
-                ]
+                )
                 if kv_cache
                 else None
             ),

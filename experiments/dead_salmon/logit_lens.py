@@ -35,6 +35,23 @@ from src.bootstrap_stats import report_mean_with_ci
 # GSM8k CoT parsing
 # ═══════════════════════════════════════════════════════════════════
 
+def maybe_force_fp32(args, coconut_model, base_model, lm_head):
+    """Optionally upcast a Llama model to fp32 for the logit lens.
+
+    setup_coconut_model casts Llama to bf16 (utils.py). bf16 round-trip of
+    fed-back hidden states (|h| ~ 100) loses ~2-3 significant digits and can
+    accumulate across recurrence steps. --fp32 isolates dtype effects from the
+    extraction/position-faithfulness fix. No-op for GPT-2 (already fp32).
+    """
+    if not getattr(args, "fp32", False) or args.model_family != "llama":
+        return coconut_model, base_model, lm_head
+    coconut_model = coconut_model.float()
+    base_model = coconut_model.base_causallm
+    lm_head = base_model.get_output_embeddings()
+    print("  [fp32] Llama upcast to float32 for logit lens.")
+    return coconut_model, base_model, lm_head
+
+
 def parse_gsm_steps(steps_list):
     """
     Parse "steps" field: ["<<16-3-4=9>>", "<<9*2=18>>"]
@@ -149,7 +166,8 @@ def extract_coconut_full(
     per_thought_attended = []
 
     if is_pause:
-        question_tokens = tokenizer.encode(question_text + "\n", add_special_tokens=True)
+        from src.utils import tokenize_question_for_recurrence
+        question_tokens = tokenize_question_for_recurrence(tokenizer, question_text)
         input_ids_list = question_tokens + [start_id] + [latent_id] * k + [end_id]
         input_ids = torch.tensor([input_ids_list], device=device)
 
@@ -200,63 +218,97 @@ def extract_coconut_full(
         input_token_ids = question_tokens
 
     else:
-        # Coconut recurrence
-        input_ids = tokenizer.encode(
-            question_text + "\n<|start-latent|>", return_tensors="pt"
-        ).to(device)
-        input_token_ids_full = input_ids[0].tolist()
+        # ── Coconut continuous recurrence (M2) ──
+        #
+        # FAITHFUL to training (coconut.py Coconut.forward continuous path +
+        # dataset.py:209 layout). The previous implementation used single-token
+        # forwards through a kv-cache with NO latent tokens in the sequence and
+        # implicit position_ids; under RoPE (Llama) that injects wrong positions
+        # at every layer, pushing fed-back states off the trained manifold
+        # (decode → '<<' / code-token garbage). GPT-2 (learned absolute pos)
+        # tolerated it, which is why only Llama collapsed.
+        #
+        # Training layout (dataset.py get_question_latent_dataset):
+        #     tokens       = question + [start] + [latent]*k + [end]
+        #     position_ids = list(range(len(tokens)))          # contiguous
+        # Continuous loop (coconut.py): latent slot p is overwritten with the
+        # LAST-LAYER hidden state at position p-1:
+        #     tensor_list[b][p] = hidden_states[b, p - 1 - offset, :]
+        # i.e. the thought injected at slot p is h[p-1], NOT h[p]. We replicate
+        # this exactly: full-sequence forward, fill slots left-to-right, one
+        # forward per fill so each thought sees previously-filled thoughts.
+        from src.utils import tokenize_question_for_recurrence
+        question_tokens = tokenize_question_for_recurrence(tokenizer, question_text)
 
-        # Step 0: process prompt
-        outputs = base_model(
-            input_ids=input_ids,
-            output_hidden_states=True, use_cache=True, output_attentions=True,
+        input_ids_list = question_tokens + [start_id] + [latent_id] * k + [end_id]
+        input_ids = torch.tensor([input_ids_list], device=device)
+        L = input_ids.shape[1]
+
+        # Contiguous positions + full mask, exactly as dataset.py builds them.
+        position_ids = torch.arange(L, device=device).unsqueeze(0)
+        attn_mask = torch.ones((1, L), device=device, dtype=torch.long)
+
+        start_latent_pos = len(question_tokens)          # <start-latent> position
+        latent_positions = [start_latent_pos + 1 + i for i in range(k)]  # k latent slots
+
+        inputs_embeds = coconut_model.embedding(input_ids)
+
+        # h_0: hidden state at <start-latent>, read from the first (all-slots-empty)
+        # pass — analogous to the pause branch's h_0 and the original t=0 point.
+        first_outputs = base_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attn_mask, position_ids=position_ids,
+            output_hidden_states=True, output_attentions=True, use_cache=False,
         )
-        h = outputs.hidden_states[-1][0, -1, :]
-        past_kv = outputs.past_key_values
-        hidden_states.append(h)
+        last_hidden = first_outputs.hidden_states[-1]
+        last_attn = first_outputs.attentions[-1][0]      # (n_heads, L, L)
 
-        # Attention of the last position (start_latent) over prompt
-        # outputs.attentions[-1]: (1, n_heads, seq_len, seq_len)
-        # Last position's attention over all prior positions
-        attn_h0 = outputs.attentions[-1][0, :, -1, :].mean(dim=0).float().cpu().numpy()
+        hidden_states.append(last_hidden[0, start_latent_pos, :])
+        attn_h0 = last_attn[:, start_latent_pos, :].mean(dim=0).float().cpu().numpy()
         per_thought_attended.append(
-            get_top_attended_tokens(attn_h0, input_token_ids_full, tokenizer, attn_top_k)
+            get_top_attended_tokens(attn_h0, question_tokens, tokenizer, attn_top_k)
         )
 
-        # Steps 1..K: recurrence
-        for t in range(k):
+        # Sequential refill: slot p ← h[p-1] from the current pass, then re-run.
+        # Matches coconut.py's max_n_latents passes (one fill per pass).
+        for i, p in enumerate(latent_positions):
             outputs = base_model(
-                inputs_embeds=h.unsqueeze(0).unsqueeze(0),
-                past_key_values=past_kv,
-                output_hidden_states=True, use_cache=True, output_attentions=True,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attn_mask, position_ids=position_ids,
+                output_hidden_states=True, output_attentions=True, use_cache=False,
             )
-            h = outputs.hidden_states[-1][0, 0, :]
-            past_kv = outputs.past_key_values
-            hidden_states.append(h)
+            last_hidden = outputs.hidden_states[-1]
+            last_attn = outputs.attentions[-1][0]        # (n_heads, L, L)
 
-            # This step's attention: (1, n_heads, 1, kv_len)
-            # The single new position attends over all KV cache positions
-            attn_ht = outputs.attentions[-1][0, :, 0, :].mean(dim=0).float().cpu().numpy()
+            h_prev = last_hidden[0, p - 1, :]            # thought injected at slot p
+            hidden_states.append(h_prev)
+
+            # Attention of slot p over all positions (this thought's attention).
+            attn_hi = last_attn[:, p, :].mean(dim=0).float().cpu().numpy()
             per_thought_attended.append(
-                get_top_attended_tokens(attn_ht, input_token_ids_full, tokenizer, attn_top_k)
+                get_top_attended_tokens(attn_hi, question_tokens, tokenizer, attn_top_k)
             )
 
-        # <end-latent> step for attention mass — averaged across ALL layers and heads.
-        end_input = torch.tensor([[end_id]], device=device)
-        outputs = base_model(
-            input_ids=end_input, past_key_values=past_kv,
-            output_hidden_states=True, use_cache=True, output_attentions=True,
+            # Fill slot p for subsequent passes.
+            inputs_embeds = inputs_embeds.clone()
+            inputs_embeds[0, p, :] = h_prev
+
+        # End-token attention mass: read the <end-latent> row from the final pass
+        # (all latent slots filled), averaged across ALL layers and heads.
+        final_outputs = base_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attn_mask, position_ids=position_ids,
+            output_hidden_states=True, output_attentions=True, use_cache=False,
         )
-        # outputs.attentions: tuple of (1, n_heads, 1, kv_len) per layer.
-        # Stack → (n_layers, n_heads, kv_len), mean over layers and heads → (kv_len,)
+        end_pos = L - 1                                  # <end-latent> position
         all_layer_end_attn = torch.stack(
-            [a[0, :, 0, :] for a in outputs.attentions], dim=0
-        )
+            [a[0, :, end_pos, :] for a in final_outputs.attentions], dim=0
+        )  # (n_layers, n_heads, L)
         end_attn = all_layer_end_attn.float().mean(dim=(0, 1)).cpu().numpy()
-        n_input = len(input_token_ids_full)
+        n_input = len(question_tokens) + 1               # prompt + <start-latent>
         end_mass = compute_attention_mass(end_attn, n_input, k)
 
-        input_token_ids = input_token_ids_full
+        input_token_ids = question_tokens
 
     return hidden_states, per_thought_attended, end_mass, input_token_ids
 
@@ -516,13 +568,15 @@ def run_prosqa_experiment(args):
 
     is_codi = (args.model == "codi")
     if is_codi:
-        codi_dict = setup_codi_model("prosqa", device)
+        codi_dict = setup_codi_model("prosqa", device, family=args.model_family)
         tokenizer = codi_dict['tokenizer']
         lm_head = codi_dict['lm_head']
     else:
         coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
-            setup_coconut_model("prosqa", args.model, device)
+            setup_coconut_model("prosqa", args.model, device, family=args.model_family)
         lm_head = base_model.get_output_embeddings()
+        coconut_model, base_model, lm_head = maybe_force_fp32(
+            args, coconut_model, base_model, lm_head)
 
     data = load_data("prosqa", args.max_instances)
     k = args.k
@@ -552,12 +606,12 @@ def run_prosqa_experiment(args):
     print(f"PROSQA: {args.model} (K={k}, N={len(data)})")
     print(f"{'='*70}")
 
-    out_dir = BASE_DIR / "outputs" / "logit_lens"
+    out_dir = BASE_DIR / "outputs" / "logit_lens" / args.model_family
     out_dir.mkdir(parents=True, exist_ok=True)
     cis_jsonl = str(out_dir / f"prosqa_{args.model}_k{k}_cis.jsonl")
     vectors_dir = out_dir / f"prosqa_{args.model}_k{k}_vectors"
     vectors_dir.mkdir(parents=True, exist_ok=True)
-    base_ctx = {'task': 'prosqa', 'model': args.model}
+    base_ctx = {'task': 'prosqa', 'model': args.model, 'family': args.model_family}
 
     # Attention mass (Coconut/Pause only — CODI has no <end-latent>)
     attn_results = [r for r in results if r['end_attn_mass'] is not None]
@@ -615,7 +669,8 @@ def run_prosqa_experiment(args):
 
     # ── Save ──
     save = {
-        'task': 'prosqa', 'model': args.model, 'k': k, 'n': len(data),
+        'task': 'prosqa', 'model': args.model, 'model_family': args.model_family,
+        'k': k, 'n': len(data),
         'attention': {'mean_prompt': float(mean_prompt), 'mean_latent': float(mean_latent),
                       'mean_self': float(mean_self), 'uses_latent': bool(uses)} if mean_prompt is not None else None,
         'logit_lens': {'n_degenerate': n_degen, 'frac_degenerate': frac, 'label': label},
@@ -644,13 +699,15 @@ def run_gsm_experiment(args):
 
     is_codi = (args.model == "codi")
     if is_codi:
-        codi_dict = setup_codi_model("gsm", device)
+        codi_dict = setup_codi_model("gsm", device, family=args.model_family)
         tokenizer = codi_dict['tokenizer']
         lm_head = codi_dict['lm_head']
     else:
         coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
-            setup_coconut_model("gsm", args.model, device)
+            setup_coconut_model("gsm", args.model, device, family=args.model_family)
         lm_head = base_model.get_output_embeddings()
+        coconut_model, base_model, lm_head = maybe_force_fp32(
+            args, coconut_model, base_model, lm_head)
 
     data = load_data("gsm", args.max_instances)
     k = args.k
@@ -717,12 +774,12 @@ def run_gsm_experiment(args):
     print(f"GSM8K: {args.model} (K={k}, N={n_valid}, skipped={n_skipped}, top_k={top_k})")
     print(f"{'='*70}")
 
-    out_dir = BASE_DIR / "outputs" / "logit_lens"
+    out_dir = BASE_DIR / "outputs" / "logit_lens" / args.model_family
     out_dir.mkdir(parents=True, exist_ok=True)
     cis_jsonl = str(out_dir / f"gsm_{args.model}_k{k}_cis.jsonl")
     vectors_dir = out_dir / f"gsm_{args.model}_k{k}_vectors"
     vectors_dir.mkdir(parents=True, exist_ok=True)
-    base_ctx = {'task': 'gsm', 'model': args.model}
+    base_ctx = {'task': 'gsm', 'model': args.model, 'family': args.model_family}
 
     # Attention mass (Coconut/Pause only — CODI has no <end-latent>)
     if attn_mass_results:
@@ -802,7 +859,8 @@ def run_gsm_experiment(args):
 
     # ── Save ──
     save = {
-        'task': 'gsm', 'model': args.model, 'k': k, 'top_k': top_k,
+        'task': 'gsm', 'model': args.model, 'model_family': args.model_family,
+        'k': k, 'top_k': top_k,
         'n_instances': n_valid, 'n_skipped': n_skipped,
         'summary': summary,
         'overall': {'hit_rate': float(ci_oh.point),
@@ -833,7 +891,14 @@ def main():
     parser.add_argument("--model", type=str,
                         choices=["base", "cot", "pause", "coconut", "coconut_u", "codi"],
                         default="coconut")
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
+        help="Base model family. Determines checkpoint paths and dtype.",
+    )
     parser.add_argument("--k", type=int, default=6)
+    parser.add_argument("--fp32", action="store_true",
+                        help="Upcast Llama to float32 for the logit lens "
+                             "(isolates bf16 round-trip error; no-op for GPT-2).")
     parser.add_argument("--max_instances", type=int, default=None)
     parser.add_argument("--top_k", type=int, default=8,
                         help="Top-k tokens for logit lens (GSM only).")

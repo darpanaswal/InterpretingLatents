@@ -8,4 +8,7 @@ primitive
 .vscode
 outputs
 .tex
+.claude
 deprecated_experiments
+Plots
+Tables

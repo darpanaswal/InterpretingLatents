@@ -19,18 +19,17 @@ Two checks:
 
 Usage:
     # ProsQA
-    python -m experiments.dead_salmon.remove_thoughts --task prosqa --models coconut coconut_u pause
+    python -m experiments.ablation.remove_thoughts --task prosqa --models pause coconut coconut_u codi
 
-    # GSM8k (including CODI)
-    python -m experiments.dead_salmon.remove_thoughts --task gsm --models coconut coconut_u pause codi
-
-    # Single model
-    python -m experiments.dead_salmon.remove_thoughts --task gsm --models codi --max_instances 100
+    # GSM8k
+    python -m experiments.ablation.remove_thoughts --task gsm --models pause coconut coconut_u codi
 """
 
 import json
 import torch
 import argparse
+import os
+import torch.distributed as dist
 from src.config import PROSQA_TEST, GSM_TEST, THOUGHT_ABLATION
 from src.utils import (
     setup_model_and_tokenizer,
@@ -56,6 +55,122 @@ def load_data(path, max_instances=None):
 def format_prompt(sample, tokenizer):
     """Format prompt for coconut/pause models (not used by CODI)."""
     return tokenizer.encode(sample["question"] + " <|start-latent|>", return_tensors="pt")
+
+
+@torch.no_grad()
+def check_standard_inference(
+    base_model, tokenizer, data, device, task="prosqa", batch_size=32,
+    title="CHECK 1: Normal inference (base/cot)",
+    family="gpt2", mode="cot",
+):
+    import math
+    print("\n" + "=" * 60)
+    print(f"{title} (batch_size={batch_size})")
+    print("=" * 60)
+
+    n_correct = 0
+    mismatches = []
+    per_instance = []
+    max_new_tokens = 64 if task == "gsm" else 128
+
+    # CRITICAL: Autoregressive generation requires left-padding
+    original_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # Prompt formatting must match training (dataset.py:_build_question_tokens).
+    # For Llama instruct-tuned runs (base+cot in this repo), training uses
+    # tokenizer.apply_chat_template(...,add_generation_prompt=True). GPT-2 has
+    # no chat template and uses raw "{q}\n".
+    use_chat_template = (
+        family == "llama"
+        and hasattr(tokenizer, "apply_chat_template")
+        and tokenizer.chat_template is not None
+    )
+    if use_chat_template:
+        print(f"  [prompt] Using chat template (family=llama, mode={mode})")
+    else:
+        print(f"  [prompt] Using raw '{{q}}\\n' (family={family}, mode={mode})")
+
+    n_batches = math.ceil(len(data) / batch_size)
+
+    for batch_idx in range(n_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(data))
+        batch = data[batch_start:batch_end]
+
+        if use_chat_template:
+            # Mirrors dataset.py:_build_question_tokens for is_instruct=True
+            prompts = [
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": sample["question"]}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                for sample in batch
+            ]
+            enc = tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding="longest",
+                add_special_tokens=False,  # template already includes BOS
+            ).to(device)
+        else:
+            prompts = [sample["question"] + "\n" for sample in batch]
+            enc = tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding="longest",
+            ).to(device)
+
+        outputs = base_model.generate(
+            input_ids=enc["input_ids"],
+            attention_mask=enc["attention_mask"],
+            max_new_tokens=max_new_tokens,
+            pad_token_id=tokenizer.pad_token_id,
+            do_sample=False
+        )
+
+        # Isolate newly generated tokens. 
+        # The prompt lengths might vary, but left-padding ensures the generation 
+        # for all sequences starts exactly after their respective input lengths.
+        prompt_lengths = enc["input_ids"].shape[1]
+
+        for b, sample in enumerate(batch):
+            idx = batch_start + b
+            pred_tokens = outputs[b][prompt_lengths:]
+            text = tokenizer.decode(pred_tokens, skip_special_tokens=True)
+
+            if task == "gsm":
+                pred_ans = extract_answer_number(text, task)
+                gold_ans = _gsm_gold_number(sample)
+                is_correct = (pred_ans == gold_ans)
+            elif task == "prosqa":
+                pred_ans = extract_answer_number(text, task)
+                gold_ans = sample.get("answer", "").strip()
+                is_correct = (gold_ans in pred_ans) or (pred_ans == gold_ans)
+
+            per_instance.append(int(is_correct))
+            if is_correct:
+                n_correct += 1
+            else:
+                mismatches.append({
+                    "idx": idx,
+                    "predicted": str(pred_ans),
+                    "correct": str(gold_ans),
+                    "full_output": text[:200],
+                })
+
+            if idx < 5:
+                status = "CORRECT" if is_correct else "WRONG"
+                print(f"  [{idx}] {status}: predicted='{pred_ans}' gold='{gold_ans}'")
+
+    # Restore the original padding side to avoid side-effects elsewhere
+    tokenizer.padding_side = original_padding_side
+
+    accuracy = n_correct / len(data) if data else 0.0
+    return accuracy, mismatches, per_instance
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -99,9 +214,10 @@ def check_identity_codebook(
     n_correct = 0
     mismatches = []
     per_instance = []  # 1/0 per instance for bootstrap
+    
+    from src.utils import run_normal_inference_pauseaware
 
     for idx, sample in enumerate(data):
-        from src.utils import run_normal_inference_pauseaware
         result = run_normal_inference_pauseaware(
             coconut_model, base_model, tokenizer, end_id, sample,
             n_thoughts, device,
@@ -127,10 +243,7 @@ def check_identity_codebook(
             status = "CORRECT" if is_correct else "WRONG"
             print(f"  [{idx}] {status}: predicted='{answer}' gold='{correct_answer}'")
 
-    accuracy = n_correct / len(data)
-    print(f"\n  Normal inference accuracy: {n_correct}/{len(data)} = {accuracy:.1%}")
-    print(f"  (This should match the checkpoint's known test accuracy.)")
-    print(f"  (If it doesn't, our manual recurrence or decoding is wrong.)")
+    accuracy = n_correct / len(data) if data else 0.0
 
     if mismatches and len(mismatches) <= 20:
         print(f"\n  Mismatched instances:")
@@ -365,8 +478,7 @@ def check_codi_inference(codi_dict, data, n_thoughts, device, task="gsm",
                 status = "CORRECT" if is_correct else "WRONG"
                 print(f"  [{idx}] {status}: predicted='{pred_ans}' gold='{gold_ans}'")
 
-    accuracy = n_correct / len(data)
-    print(f"\n  Normal inference accuracy: {n_correct}/{len(data)} = {accuracy:.1%}")
+    accuracy = n_correct / len(data) if data else 0.0
 
     if mismatches and len(mismatches) <= 20:
         print(f"\n  Mismatched instances:")
@@ -558,6 +670,36 @@ def check_hidden_state_identity(base_model, tokenizer, sample, n_thoughts, devic
     return all_match
 
 
+def gather_results(mismatches, per_instance, world_size, total_instances):
+    if world_size == 1:
+        accuracy = sum(per_instance) / len(per_instance) if per_instance else 0
+        return mismatches, per_instance, accuracy
+
+    import torch.distributed as dist
+    gathered_per = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered_per, per_instance)
+    
+    gathered_mismatches = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered_mismatches, mismatches)
+
+    global_per_instance = [0] * total_instances
+    for r in range(world_size):
+        for local_i, val in enumerate(gathered_per[r]):
+            global_idx = local_i * world_size + r
+            if global_idx < total_instances:
+                global_per_instance[global_idx] = val
+
+    flat_mismatches = []
+    for r in range(world_size):
+        for m in gathered_mismatches[r]:
+            # Update local idx to global idx for clear reporting
+            m["idx"] = m["idx"] * world_size + r
+            flat_mismatches.append(m)
+
+    accuracy = sum(global_per_instance) / total_instances if total_instances else 0
+    return flat_mismatches, global_per_instance, accuracy
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sanity checks for thought vector experiments.")
     parser.add_argument(
@@ -565,12 +707,17 @@ def main():
         default="prosqa",
     )
     parser.add_argument("--batch_size", type=int, default=32,
-                    help="Inference batch size. Matches test.py's batch_size (default 32).")
+                    help="Inference batch size for base/cot/codi models (default 32).")
     parser.add_argument(
         "--models", type=str, nargs="+",
-        choices=["coconut", "coconut_u", "pause", "codi"],
+        choices=["base", "cot", "coconut", "coconut_u", "pause", "codi"],
         default=None,
         help="Which models to check. Defaults: prosqa=[coconut, coconut_u, pause], gsm=[coconut, coconut_u, pause, codi]",
+    )
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"],
+        default="gpt2",
+        help="Which base model family was used. Determines checkpoint paths and logic."
     )
     parser.add_argument("--data_path", type=str, default=None)
     parser.add_argument("--n_thoughts", type=int, default=6)
@@ -578,17 +725,45 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
+    # DDP Initialization
+    if "LOCAL_RANK" in os.environ:
+        dist.init_process_group("nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        args.device = f"cuda:{local_rank}"
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
+        import builtins
+        _original_print = builtins.print
+        def _ddp_print(*pargs, **kwargs):
+            if rank == 0:
+                _original_print(*pargs, **kwargs)
+        builtins.print = _ddp_print
+    else:
+        rank = 0
+        world_size = 1
+
     # Set defaults based on task
     if args.models is None:
         args.models = ["coconut", "coconut_u", "pause", "codi"]
 
     # Set data path
     data_path = args.data_path or str(PROSQA_TEST if args.task == "prosqa" else GSM_TEST)
-    output_base = THOUGHT_ABLATION / args.task
-    output_base.mkdir(parents=True, exist_ok=True)
+    output_base = THOUGHT_ABLATION / args.task / args.model_family
+    if rank == 0:
+        output_base.mkdir(parents=True, exist_ok=True)
 
-    data = load_data(data_path, args.max_instances)
-    print(f"[INFO] Task: {args.task}, data: {data_path}, instances: {len(data)}")
+    global_data = load_data(data_path, args.max_instances)
+    print(f"[INFO] Task: {args.task}, data: {data_path}, instances: {len(global_data)}")
+
+    # Shard data across GPUs
+    if world_size > 1:
+        data = global_data[rank::world_size]
+        # Wait for all processes to finish loading
+        dist.barrier()
+    else:
+        data = global_data
 
     for model_name in args.models:
         print(f"\n{'#'*60}")
@@ -596,10 +771,11 @@ def main():
         print(f"{'#'*60}")
 
         is_codi = (model_name == "codi")
+        is_base_cot = (model_name in ["base", "cot"])
 
         if is_codi:
             # CODI: special handling
-            codi_dict = setup_codi_model(args.task, args.device)
+            codi_dict = setup_codi_model(args.task, args.device, family=args.model_family)
 
             # Check 1: Normal inference
             accuracy, mismatches, correct_kn = check_codi_inference(
@@ -608,117 +784,182 @@ def main():
                 batch_size=args.batch_size,
                 title=f"CHECK 1: CODI normal inference (K={args.n_thoughts})",
             )
+            mismatches, correct_kn, accuracy = gather_results(mismatches, correct_kn, world_size, len(global_data))
 
-            accuracy_k0, _, correct_k0 = check_codi_inference(
+            accuracy_k0, mismatches_k0, correct_k0 = check_codi_inference(
                 codi_dict, data, 0, args.device,
                 task=args.task,
                 batch_size=args.batch_size,
                 title="CHECK 4: CODI baseline (K=0, no recurrence)",
             )
+            mismatches_k0, correct_k0, accuracy_k0 = gather_results(mismatches_k0, correct_k0, world_size, len(global_data))
 
             # Skip position ID and hidden state checks for CODI
             print("  Skipping position ID and hidden state checks (CODI uses LoRA + projection)")
 
+        elif is_base_cot:
+            # Base and CoT models
+            _, base_model, tokenizer, _, _, _, _ = \
+                setup_model_and_tokenizer(args.task, model_name, args.device, family=args.model_family)
+
+            # Route through standard huggingface generate without the coconut wrapper
+            accuracy, mismatches, correct_k0 = check_standard_inference(
+                base_model, tokenizer, data, args.device, task=args.task,
+                batch_size=args.batch_size,
+                title=f"CHECK 1: Normal inference ({model_name}, no continuous thoughts)",
+                family=args.model_family, mode=model_name,
+            )
+            mismatches, correct_k0, accuracy = gather_results(mismatches, correct_k0, world_size, len(global_data))
+
+            print(f"  Skipping position ID, hidden state, and K=0 comparisons (not applicable to {model_name})")
+
+            if rank == 0:
+                # Save basic bootstrap CIs
+                ctx = {"task": args.task, "model": model_name, "n_thoughts": 0}
+                cis_path = str(output_base / f"{model_name}/removeThoughts_cis.jsonl")
+                
+                ci_k0 = report_mean_with_ci(
+                    correct_k0, metric="accuracy",
+                    context=ctx, cis_jsonl=cis_path, log=True,
+                )
+
+                # Summary
+                print("\n" + "=" * 60)
+                print(f"SUMMARY ({args.task}/{model_name})")
+                print("=" * 60)
+                print(f"  Inference accuracy: {ci_k0.to_short_str()}")
+
+                # Save JSON explicitly for base/cot and skip to the next model
+                baselines = {
+                    "task": args.task,
+                    "model": model_name,
+                    "n_instances": len(global_data),
+                    "accuracy": accuracy,
+                    "n_correct": int(accuracy * len(global_data)),
+                    "bootstrap": {
+                        "accuracy": ci_k0.to_short_str(),
+                    },
+                    "mismatched_instances": [
+                        {"idx": m["idx"], "predicted": m["predicted"], "correct": m["correct"]}
+                        for m in mismatches
+                    ],
+                }
+                baselines_path = output_base / f"{model_name}/removeThoughts.json"
+                with open(baselines_path, "w") as f:
+                    json.dump(baselines, f, indent=2)
+                print(f"  Baselines saved to {baselines_path}")
+            
+            del base_model
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+            # Skip the rest of the loop (paired differences, McNemar, etc.)
+            continue
+
         else:
             # Coconut/Pause models
             coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
-                setup_model_and_tokenizer(args.task, model_name, args.device)
+                setup_model_and_tokenizer(args.task, model_name, args.device, family=args.model_family)
 
-            # Check 1: Normal inference accuracy (K=n_thoughts)
             accuracy, mismatches, correct_kn = check_identity_codebook(
                 coconut_model, base_model, tokenizer, start_id, end_id, latent_id,
                 data, args.n_thoughts, args.device, task=args.task,
                 title=f"CHECK 1: Identity codebook (normal inference accuracy, K={args.n_thoughts})",
             )
+            mismatches, correct_kn, accuracy = gather_results(mismatches, correct_kn, world_size, len(global_data))
 
             # Checks 2 & 3: Only for coconut models (not pause, not CODI)
-            if not coconut_model.feedback_mode == "pause_curriculum":
-                check_position_ids(base_model, tokenizer, data[0], args.n_thoughts, args.device)
-                check_hidden_state_identity(base_model, tokenizer, data[0], args.n_thoughts, args.device)
-            else:
-                print("  Skipping position ID and hidden state checks (not applicable to pause)")
+            if rank == 0:
+                if coconut_model.feedback_mode == "pause_curriculum":
+                    print("  Skipping position ID and hidden state checks (not applicable to pause)")
+                elif args.model_family == "llama":
+                    print("  Skipping position ID and hidden state checks (Llama uses RoPE, not absolute pos)")
+                else:
+                    check_position_ids(base_model, tokenizer, global_data[0], args.n_thoughts, args.device)
+                    check_hidden_state_identity(base_model, tokenizer, global_data[0], args.n_thoughts, args.device)
 
             # Check 4: K=0 baseline — no recurrence at all
-            accuracy_k0, _, correct_k0 = check_identity_codebook(
+            accuracy_k0, mismatches_k0, correct_k0 = check_identity_codebook(
                 coconut_model, base_model, tokenizer, start_id, end_id, latent_id,
                 data, 0, args.device, task=args.task,
                 title="CHECK 4: Baseline (K=0, no recurrence)",
             )
+            mismatches_k0, correct_k0, accuracy_k0 = gather_results(mismatches_k0, correct_k0, world_size, len(global_data))
 
             # Free model memory
             del coconut_model, base_model
 
-        # ── Bootstrap CIs ──
-        ctx = {"task": args.task, "model": model_name, "n_thoughts": args.n_thoughts}
-        cis_path = str(output_base / f"{model_name}/removeThoughts_cis.jsonl")
-
-        # Pattern A: accuracy CI for K=n_thoughts
-        ci_kn = report_mean_with_ci(
-            correct_kn, metric=f"accuracy_K{args.n_thoughts}",
-            context=ctx, cis_jsonl=cis_path, log=True,
-        )
-
-        # Pattern A: accuracy CI for K=0
-        ctx_k0 = {**ctx, "n_thoughts": 0}
-        ci_k0 = report_mean_with_ci(
-            correct_k0, metric="accuracy_K0",
-            context=ctx_k0, cis_jsonl=cis_path, log=True,
-        )
-
-        # Pattern C: paired difference (K=n vs K=0) on identical instances
-        # diff_i = correct_kn_i - correct_k0_i; positive means recurrence helps
-        diff_res = paired_bootstrap_diff(
-            correct_kn, correct_k0, metric="acc_diff_Kn_minus_K0",
-        )
-        save_record(cis_path, diff_res, context=ctx)
-        print(f"  [CI] paired diff (K{args.n_thoughts}−K0): {diff_res.to_short_str()}")
-
-        # McNemar exact test on same paired vectors
-        mc = mcnemar_test(correct_kn, correct_k0, metric="mcnemar_Kn_vs_K0")
-        save_record(cis_path, mc, context=ctx)
-        print(f"  [CI] McNemar p={mc['p_value']:.4g}  "
-              f"(b={mc['b_a_only']}, c={mc['c_b_only']}, "
-              f"n_disc={mc['n_discordant']})")
-
-        # ── Summary ──
-        print("\n" + "=" * 60)
-        print(f"SUMMARY ({args.task}/{model_name})")
-        print("=" * 60)
-        print(f"  Normal inference (K={args.n_thoughts}): {ci_kn.to_short_str()}")
-        print(f"  K=0 (no recurrence):                    {ci_k0.to_short_str()}")
-        if abs(accuracy_k0 - accuracy) < 0.02:
-            print(f"  WARNING: K=0 matches K={args.n_thoughts} — recurrence may be unnecessary")
-        else:
-            print(f"  K=0 drops by {accuracy - accuracy_k0:.1%} — recurrence provides signal")
-        print(f"  Paired diff:  {diff_res.to_short_str()}")
-        print(f"  McNemar p={mc['p_value']:.4g}")
-
-        # ── Save baselines JSON ──
-        baselines = {
-            "task": args.task,
-            "model": model_name,
-            "n_thoughts": args.n_thoughts,
-            "n_instances": len(data),
-            "unquantized_accuracy": accuracy,
-            "k0_accuracy": accuracy_k0,
-            "n_correct_unquantized": int(accuracy * len(data)),
-            "n_correct_k0": int(accuracy_k0 * len(data)),
-            "bootstrap": {
-                f"accuracy_K{args.n_thoughts}": ci_kn.to_short_str(),
-                "accuracy_K0": ci_k0.to_short_str(),
-                "paired_diff": diff_res.to_short_str(),
-                "mcnemar_p": mc["p_value"],
-            },
-            "mismatched_instances_unquantized": [
-                {"idx": m["idx"], "predicted": m["predicted"], "correct": m["correct"]}
-                for m in mismatches
-            ],
-        }
-        baselines_path = output_base / f"{model_name}/removeThoughts.json"
-        with open(baselines_path, "w") as f:
-            json.dump(baselines, f, indent=2)
-        print(f"  Baselines saved to {baselines_path}")
-        print(f"  CIs saved to {cis_path}")
+        if rank == 0:
+            # ── Bootstrap CIs ──
+            ctx = {"task": args.task, "model": model_name, "n_thoughts": args.n_thoughts}
+            cis_path = str(output_base / f"{model_name}/removeThoughts_cis.jsonl")
+    
+            # Pattern A: accuracy CI for K=n_thoughts
+            ci_kn = report_mean_with_ci(
+                correct_kn, metric=f"accuracy_K{args.n_thoughts}",
+                context=ctx, cis_jsonl=cis_path, log=True,
+            )
+    
+            # Pattern A: accuracy CI for K=0
+            ctx_k0 = {**ctx, "n_thoughts": 0}
+            ci_k0 = report_mean_with_ci(
+                correct_k0, metric="accuracy_K0",
+                context=ctx_k0, cis_jsonl=cis_path, log=True,
+            )
+    
+            # Pattern C: paired difference (K=n vs K=0) on identical instances
+            # diff_i = correct_kn_i - correct_k0_i; positive means recurrence helps
+            diff_res = paired_bootstrap_diff(
+                correct_kn, correct_k0, metric="acc_diff_Kn_minus_K0",
+            )
+            save_record(cis_path, diff_res, context=ctx)
+            print(f"  [CI] paired diff (K{args.n_thoughts}−K0): {diff_res.to_short_str()}")
+    
+            # McNemar exact test on same paired vectors
+            mc = mcnemar_test(correct_kn, correct_k0, metric="mcnemar_Kn_vs_K0")
+            save_record(cis_path, mc, context=ctx)
+            print(f"  [CI] McNemar p={mc['p_value']:.4g}  "
+                  f"(b={mc['b_a_only']}, c={mc['c_b_only']}, "
+                  f"n_disc={mc['n_discordant']})")
+    
+            # ── Summary ──
+            print("\n" + "=" * 60)
+            print(f"SUMMARY ({args.task}/{model_name})")
+            print("=" * 60)
+            print(f"  Normal inference (K={args.n_thoughts}): {ci_kn.to_short_str()}")
+            print(f"  K=0 (no recurrence):                    {ci_k0.to_short_str()}")
+            if abs(accuracy_k0 - accuracy) < 0.02:
+                print(f"  WARNING: K=0 matches K={args.n_thoughts} — recurrence may be unnecessary")
+            else:
+                print(f"  K=0 drops by {accuracy - accuracy_k0:.1%} — recurrence provides signal")
+            print(f"  Paired diff:  {diff_res.to_short_str()}")
+            print(f"  McNemar p={mc['p_value']:.4g}")
+    
+            # ── Save baselines JSON ──
+            baselines = {
+                "task": args.task,
+                "model": model_name,
+                "n_thoughts": args.n_thoughts,
+                "n_instances": len(global_data),
+                "unquantized_accuracy": accuracy,
+                "k0_accuracy": accuracy_k0,
+                "n_correct_unquantized": int(accuracy * len(global_data)),
+                "n_correct_k0": int(accuracy_k0 * len(global_data)),
+                "bootstrap": {
+                    f"accuracy_K{args.n_thoughts}": ci_kn.to_short_str(),
+                    "accuracy_K0": ci_k0.to_short_str(),
+                    "paired_diff": diff_res.to_short_str(),
+                    "mcnemar_p": mc["p_value"],
+                },
+                "mismatched_instances_unquantized": [
+                    {"idx": m["idx"], "predicted": m["predicted"], "correct": m["correct"]}
+                    for m in mismatches
+                ],
+            }
+            baselines_path = output_base / f"{model_name}/removeThoughts.json"
+            with open(baselines_path, "w") as f:
+                json.dump(baselines, f, indent=2)
+            print(f"  Baselines saved to {baselines_path}")
+            print(f"  CIs saved to {cis_path}")
 
         # Free GPU memory before loading next model
         torch.cuda.empty_cache() if torch.cuda.is_available() else None

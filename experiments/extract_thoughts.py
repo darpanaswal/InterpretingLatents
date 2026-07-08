@@ -6,13 +6,15 @@ and saves the final hidden state h_t at each step t = 0, ..., K.
 
 Output: a single .pt file containing:
     - "thoughts": Tensor of shape (N, K+1, D)
-        N = number of instances, K = recurrence steps, D = hidden dim (768 for GPT-2)
+        N = number of instances, K = recurrence steps,
+        D = hidden dim (768 for GPT-2, 2048 for Llama-3.2-1B)
     - "instance_indices": list of ints, mapping row i to its index
     - "n_thoughts": int, the K used
 
 Usage:
     python extract_thoughts.py --model coconut --n_thoughts 6
     python extract_thoughts.py --model codi --task gsm --n_thoughts 6
+    python extract_thoughts.py --model coconut_u --model_family llama --n_thoughts 6
 """
 
 import json
@@ -76,7 +78,11 @@ def extract_thoughts_single_instance(
         model types for probing and analysis.
     """
     pause = is_pause_model(coconut_model)
-    hidden_dim = base_model.config.n_embd
+    # GPT-2 exposes `n_embd`; Llama exposes `hidden_size`.
+    hidden_dim = getattr(base_model.config, "n_embd",
+                         getattr(base_model.config, "hidden_size", None))
+    if hidden_dim is None:
+        raise RuntimeError("Could not determine hidden size from model config")
 
     if pause:
         return _extract_thoughts_pause(
@@ -104,9 +110,12 @@ def _extract_thoughts_pause(
     """
     thoughts = torch.zeros(n_thoughts + 1, hidden_dim)
 
-    # Build input sequence with thought tokens
-    question_text = sample["question"]
-    question_tokens = tokenizer.encode(question_text + "\n", add_special_tokens=True)
+    # Build input sequence with thought tokens.
+    # Prompt tokenization is family-aware (Llama uses the chat template,
+    # GPT-2 uses raw "{q}\n"); tokenize_question_for_recurrence mirrors
+    # dataset.py:_build_question_tokens so positions align with training.
+    from src.utils import tokenize_question_for_recurrence
+    question_tokens = tokenize_question_for_recurrence(tokenizer, sample["question"])
 
     input_ids_list = (
         question_tokens
@@ -163,12 +172,28 @@ def _extract_thoughts_coconut(
     """
     thoughts = torch.zeros(n_thoughts + 1, hidden_dim)
 
-    # Tokenize question and append <start-latent> token
-    question_tokens = tokenizer.encode(sample["question"], add_special_tokens=True)
+    # Tokenize question (family-aware) and append <start-latent> token.
+    # Mirrors gradient_subspace.py / superposition.py recurrence prompts.
+    from src.utils import tokenize_question_for_recurrence
+    question_tokens = tokenize_question_for_recurrence(tokenizer, sample["question"])
     input_ids = torch.tensor([question_tokens + [start_id]], device=device)
+
+    # Pass explicit attention_mask + position_ids at every step, matching the
+    # canonical unbatched recurrence in superposition.py. Batch=1, no padding:
+    #   # Step 0: positions [0, 1, ..., L-1],  L = len(question_tokens)+1
+    #   # Step t (t=1..K): new-token position_id = L + t - 1
+    #   # attention_mask grows by 1 each step (all real tokens, no pad)
+    # GPT-2 (absolute PE) auto-computes the same ids from the cache, so this
+    # is a no-op there; for Llama (RoPE) it makes the recurrence positions
+    # explicit and audit-equivalent to the sibling scripts.
+    L = input_ids.size(1)
+    attention_mask = torch.ones_like(input_ids)
+    position_ids = torch.arange(L, device=device).unsqueeze(0)
 
     outputs = base_model(
         input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
         output_hidden_states=True,
         use_cache=True,
     )
@@ -178,9 +203,19 @@ def _extract_thoughts_coconut(
 
     # Recurrence: feed h back as input embedding for K steps
     ct = h.unsqueeze(0).unsqueeze(0)
+    running_mask = attention_mask                          # (1, L)
     for t in range(1, n_thoughts + 1):
+        running_mask = torch.cat(
+            [running_mask, torch.ones((1, 1), dtype=running_mask.dtype,
+                                      device=device)],
+            dim=1,
+        )
+        pos_t = torch.tensor([[L + t - 1]], device=device)
+
         outputs = base_model(
             inputs_embeds=ct,
+            attention_mask=running_mask,
+            position_ids=pos_t,
             past_key_values=past_kv,
             output_hidden_states=True,
             use_cache=True,
@@ -519,6 +554,11 @@ def main():
              "the model is forced to recurse at inference time even though "
              "it was never optimized for that regime.",
     )
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
+        help="Base model family. Determines checkpoint paths, dtype, and "
+             "prompt formatting (Llama uses the chat template).",
+    )
     parser.add_argument("--n_thoughts", type=int, default=6)
     parser.add_argument("--max_instances", type=int, default=None)
     parser.add_argument("--output_path", type=str, default=None)
@@ -536,11 +576,12 @@ def main():
 
     prosqa_path = str(PROSQA_TEST)
     gsm_path = str(GSM_TEST)
+    # Namespace by family so gpt2 and llama runs don't clobber each other.
     output_path = args.output_path or str(
-        THOUGHTS / f"{args.task}/thoughts_{args.model}.pt"
+        THOUGHTS / f"{args.model_family}/{args.task}/thoughts_{args.model}.pt"
     )
 
-    print(f"[INFO] Model: {args.model}")
+    print(f"[INFO] Model: {args.model}  Family: {args.model_family}")
     if args.task == "prosqa":
         print(f"[INFO] ProsQA data: {prosqa_path}")
     else:
@@ -551,13 +592,17 @@ def main():
     # Initialize models based on model type
     is_codi = (args.model == "codi")
     if is_codi:
-        codi_dict = setup_codi_model(args.task, args.device)
+        codi_dict = setup_codi_model(args.task, args.device, family=args.model_family)
         D = codi_dict['hidden_size']
     else:
         coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = setup_model_and_tokenizer(
-            args.task, args.model, args.device
+            args.task, args.model, args.device, family=args.model_family
         )
-        D = base_model.config.n_embd
+        # GPT-2 exposes `n_embd`; Llama exposes `hidden_size`.
+        D = getattr(base_model.config, "n_embd",
+                    getattr(base_model.config, "hidden_size", None))
+        if D is None:
+            raise RuntimeError("Could not determine hidden size from model config")
 
     data = load_data(args.task, args.max_instances)
     N = len(data)
@@ -586,6 +631,7 @@ def main():
         "instance_indices": list(range(N)),
         "n_thoughts": K,
         "model": args.model,
+        "model_family": args.model_family,
         "data_path": prosqa_path if args.task == "prosqa" else gsm_path,
     }
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
