@@ -1,0 +1,61 @@
+\begin{table*}[h!]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Cumulative top-$k$ raw probabilities. T1 = top-1, T3 = top-3, $\Delta$ = T3 $-$ T1. Coconut $u{=}0.0$ and Pause-as-thought show negligible gaps throughout, concentrating mass on a single candidate. Coconut $u{=}0.3$ shows substantial gaps at shallow $k$ (broad exploration) that narrow with depth.}
+\begin{tabular}{l ccc ccc ccc ccc ccc ccc}
+\toprule
+ & \multicolumn{3}{c}{Base} & \multicolumn{3}{c}{CoT} & \multicolumn{3}{c}{Pause} & \multicolumn{3}{c}{Coconut} & \multicolumn{3}{c}{Coconut$_{u}$} & \multicolumn{3}{c}{CODI} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10} \cmidrule(lr){11-13} \cmidrule(lr){14-16} \cmidrule(lr){17-19}
+$k$ & T1 & T3 & $\Delta$ & T1 & T3 & $\Delta$ & T1 & T3 & $\Delta$ & T1 & T3 & $\Delta$ & T1 & T3 & $\Delta$ & T1 & T3 & $\Delta$ \\
+\midrule
+0 & .053 & .065 & .012 & .385 & .399 & .014 & .001 & .002 & .000 & .000 & .000 & .000 & .756 & .945 & .189 & .032 & .033 & .000 \\
+1 & .005 & .005 & .001 & .428 & .443 & .015 & .001 & .002 & .000 & .000 & .000 & .000 & .759 & .959 & .200 & .025 & .025 & .000 \\
+2 & .005 & .006 & .001 & .096 & .100 & .004 & .011 & .012 & .001 & .002 & .002 & .000 & .672 & .803 & .131 & .028 & .028 & .001 \\
+3 & .001 & .001 & .000 & .044 & .044 & .001 & .342 & .345 & .003 & .371 & .372 & .001 & .352 & .395 & .043 & .157 & .158 & .001 \\
+4 & .000 & .000 & .000 & .025 & .025 & .001 & .585 & .590 & .005 & .628 & .629 & .001 & .226 & .241 & .014 & .159 & .160 & .001 \\
+\bottomrule
+\end{tabular}
+\label{tab:candidate_parallelism}
+\end{table*}
+
+
+\begin{table}[h!]
+\centering
+\small
+\caption{Convergence from $k{=}0$ to $k{=}4$. Pause-as-thought and Coconut $u{=}0.0$ show increasing P(correct) with decreasing entropy (exploration to convergence). Base, CoT, and Coconut $u{=}0.3$ show degrading or flat P(correct).}
+\begin{tabular}{l cc cc}
+\toprule
+& \multicolumn{2}{c}{$P(\text{correct})$} & \multicolumn{2}{c}{$H/\log_2 N$} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+Condition & $k{=}0$ & $k{=}4$ & $k{=}0$ & $k{=}4$ \\
+\midrule
+Base & .05 & .00 & .58 & .40 \\
+CoT & .36 & .02 & .16 & .27 \\
+Pause & .00 & .58 & .51 & .13 \\
+Coconut & .00 & .63 & .43 & .14 \\
+Coconut$_{u}$ & .84 & .23 & .44 & .38 \\
+CODI & .02 & .16 & .34 & .19 \\
+\bottomrule
+\end{tabular}
+\label{tab:convergence_trajectories}
+\end{table}
+
+
+\begin{table*}[h!]
+\centering
+\small
+\caption{Per-instance analysis. ``P(correct) increases'' counts instances where the raw probability summed over correct candidates is higher at the final $k$ evaluated for that instance than at $k{=}0$. The close match between Coconut $u{=}0.0$ (61.5\%) and Pause-as-thought (62.5\%) reinforces that the curriculum drives the convergence pattern.}
+\begin{tabular}{l cccccc}
+\toprule
+ & Base & CoT & Pause & Coconut & Coconut$_{u}$ & CODI \\
+\midrule
+P(correct) increases ($k{=}0 \to k_{\text{last}}$) & 0\% & 7\% & 68\% & 61\% & 10\% & 40\% \\
+Top-1 correct at final $k$ & 53\% & 66\% & 93\% & 89\% & 78\% & 76\% \\
+High entropy at $k{=}0$ ($H/\log_2 N > 0.5$) & 61\% & 14\% & 55\% & 45\% & 45\% & 30\% \\
+\midrule
+$n$ & 496 & 496 & 496 & 496 & 496 & 496 \\
+\bottomrule
+\end{tabular}
+\label{tab:per_instance_statistics}
+\end{table*}

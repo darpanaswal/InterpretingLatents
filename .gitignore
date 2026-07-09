@@ -9,6 +9,4 @@ primitive
 outputs
 .tex
 .claude
-deprecated_experiments
-Plots
-Tables
+commit.sh

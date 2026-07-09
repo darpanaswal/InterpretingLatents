@@ -1,0 +1,31 @@
+\subsection{Variance Decomposition}
+\label{app:variance_decomposition_stats}
+
+Point estimates and 95\% percentile bootstrap CIs for the ANOVA-style decomposition of thought-token variance. Rows use the original, unablated thoughts. Var$_\text{resid}$ is the interaction/residual component.
+
+\begin{table}[h!]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Variance-decomposition statistical summary across tasks.}
+\begin{tabular}{l ccc c}
+\toprule
+Model & Var$_\text{time}$ [\% CI] & Var$_\text{inst}$ [\% CI] & Var$_\text{resid}$ [\% CI] & $n$ \\
+\midrule
+\multicolumn{5}{c}{\textbf{Graph-Hopping}} \\
+\midrule
+PaT & 25.1 [24.8, 25.6] & 64.9 [64.4, 65.2] & 10.0 [9.8, 10.2] & 500 \\
+C & 24.7 [24.3, 25.1] & 67.1 [66.7, 67.5] & 8.2 [8.1, 8.3] & 500 \\
+C$_u$ & 63.4 [62.9, 63.9] & 32.9 [32.4, 33.3] & 3.7 [3.7, 3.7] & 500 \\
+CODI & 89.0 [88.6, 89.5] & 6.6 [6.3, 6.9] & 4.4 [4.2, 4.6] & 500 \\
+\midrule
+\multicolumn{5}{c}{\textbf{Arithmetic-Reasoning}} \\
+\midrule
+PaT & 11.2 [11.0, 11.5] & 39.2 [38.8, 39.5] & 49.6 [49.3, 49.9] & 1319 \\
+C & 6.2 [6.1, 6.3] & 85.3 [85.2, 85.4] & 8.5 [8.5, 8.5] & 1319 \\
+C$_u$ & 6.1 [6.1, 6.3] & 85.6 [85.5, 85.7] & 8.3 [8.2, 8.4] & 1319 \\
+CODI & 10.7 [10.5, 11.0] & 30.9 [30.6, 31.2] & 58.4 [58.0, 58.8] & 1319 \\
+\bottomrule
+\end{tabular}
+\label{tab:variance_decomposition_stats_combined}
+\end{table}

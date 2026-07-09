@@ -1,0 +1,31 @@
+\begin{table}[!h]
+\centering
+\tiny
+\setlength{\tabcolsep}{3pt}
+\caption{Variance-decomposition interventions across model--task pairs.
+Ablations remove one mean component; isolations keep only one.
+Matched-norm random control ($\varepsilon_{\text{rand}}$) adds isotropic noise
+scaled to $|\mu_t - \mu|$.
+Values are accuracy (\%) with 95\% bootstrap half-widths.}
+\label{tab:mean_ablation}
+\begin{tabular}{ll c ccc ccc c}
+\toprule
+ & & & \multicolumn{3}{c}{\textbf{Ablate}} & \multicolumn{3}{c}{\textbf{Isolate}} & \\
+\cmidrule(lr){4-6}\cmidrule(lr){7-9}
+\textbf{Task} & \textbf{Model} & \textbf{Orig.}
+  & $\mu_t$ & $\mu_i$ & $\varepsilon$
+  & $\mu_t$ & $\mu_i$ & $\varepsilon$
+  & \makecell{$\varepsilon_{\text{rand}}$ \\ \textbf{ctrl.}} \\
+\midrule
+\multirow{4}{*}{\makecell[l]{Graph-\\Hopping}} & PaT & $95.4 {\scriptstyle \pm 1.8}$ & $95.4 {\scriptstyle \pm 1.8}$ & $28.6 {\scriptstyle \pm 4.1}$ & $95.4 {\scriptstyle \pm 1.8}$ & $29.6 {\scriptstyle \pm 4.1}$ & $95.4 {\scriptstyle \pm 1.8}$ & $28.6 {\scriptstyle \pm 4.0}$ & $95.4 {\scriptstyle \pm 1.8}$ \\
+ & C & $98.0 {\scriptstyle \pm 1.2}$ & $98.0 {\scriptstyle \pm 1.2}$ & $98.0 {\scriptstyle \pm 1.2}$ & $98.0 {\scriptstyle \pm 1.2}$ & $98.0 {\scriptstyle \pm 1.2}$ & $98.0 {\scriptstyle \pm 1.2}$ & $98.0 {\scriptstyle \pm 1.2}$ & $98.0 {\scriptstyle \pm 1.2}$ \\
+ & C$_u$ & $96.0 {\scriptstyle \pm 1.7}$ & $95.8 {\scriptstyle \pm 1.7}$ & $96.0 {\scriptstyle \pm 1.7}$ & $96.0 {\scriptstyle \pm 1.7}$ & $96.0 {\scriptstyle \pm 1.7}$ & $95.8 {\scriptstyle \pm 1.7}$ & $95.8 {\scriptstyle \pm 1.7}$ & $94.4 {\scriptstyle \pm 1.9}$ \\
+ & CODI & $79.6 {\scriptstyle \pm 3.6}$ & $79.8 {\scriptstyle \pm 3.6}$ & $80.2 {\scriptstyle \pm 3.6}$ & $79.8 {\scriptstyle \pm 3.6}$ & $80.2 {\scriptstyle \pm 3.6}$ & $79.8 {\scriptstyle \pm 3.6}$ & $80.2 {\scriptstyle \pm 3.6}$ & $79.4 {\scriptstyle \pm 3.6}$ \\
+\midrule
+\multirow{4}{*}{\makecell[l]{Arithmetic-\\Reasoning}} & PaT & $26.4 {\scriptstyle \pm 2.3}$ & $26.9 {\scriptstyle \pm 2.4}$ & $22.1 {\scriptstyle \pm 2.2}$ & $26.6 {\scriptstyle \pm 2.3}$ & $22.2 {\scriptstyle \pm 2.1}$ & $26.3 {\scriptstyle \pm 2.3}$ & $22.3 {\scriptstyle \pm 2.2}$ & $26.5 {\scriptstyle \pm 2.3}$ \\
+ & C & $35.7 {\scriptstyle \pm 2.4}$ & $32.4 {\scriptstyle \pm 2.5}$ & $27.8 {\scriptstyle \pm 2.5}$ & $11.3 {\scriptstyle \pm 1.7}$ & $8.6 {\scriptstyle \pm 1.4}$ & $9.9 {\scriptstyle \pm 1.6}$ & $23.8 {\scriptstyle \pm 2.3}$ & $33.4 {\scriptstyle \pm 2.4}$ \\
+ & C$_u$ & $30.8 {\scriptstyle \pm 2.5}$ & $30.3 {\scriptstyle \pm 2.4}$ & $23.6 {\scriptstyle \pm 2.2}$ & $10.6 {\scriptstyle \pm 1.7}$ & $7.8 {\scriptstyle \pm 1.4}$ & $9.4 {\scriptstyle \pm 1.6}$ & $19.4 {\scriptstyle \pm 2.1}$ & $30.4 {\scriptstyle \pm 2.3}$ \\
+ & CODI & $41.8 {\scriptstyle \pm 2.7}$ & $41.0 {\scriptstyle \pm 2.7}$ & $31.2 {\scriptstyle \pm 2.4}$ & $31.9 {\scriptstyle \pm 2.5}$ & $15.6 {\scriptstyle \pm 1.9}$ & $28.8 {\scriptstyle \pm 2.4}$ & $31.1 {\scriptstyle \pm 2.5}$ & $41.9 {\scriptstyle \pm 2.7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}

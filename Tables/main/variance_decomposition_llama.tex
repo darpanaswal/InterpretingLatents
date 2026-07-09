@@ -1,0 +1,22 @@
+\begin{table}[!h]
+\centering
+\tiny
+\setlength{\tabcolsep}{3pt}
+\caption{Variance decomposition of thought tokens into temporal-- and instance--specific components. Residual variance = 100 - (Var$_\text{time}$ + Var$_\text{inst}$) is the interactive variance. All reported scores are percentages with 95\% bootstrap CIs.}
+\label{tab:variance_decomposition}
+\begin{tabular}{l cc | cc}
+\toprule
+& \multicolumn{2}{c}{\textbf{Graph-Hopping}} & \multicolumn{2}{c}{\textbf{Arithmetic-Reasoning}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+\textbf{Model} & \textbf{Var}$_\textbf{time}$ & \textbf{Var}$_\textbf{inst}$ & \textbf{Var}$_\textbf{time}$ & \textbf{Var}$_\textbf{inst}$ \\
+\midrule
+PaT & $25.1 {\scriptstyle \pm 0.4}$ & $64.9 {\scriptstyle \pm 0.4}$ & $11.2 {\scriptstyle \pm 0.2}$ & $39.2 {\scriptstyle \pm 0.3}$ \\
+\midrule
+C & $24.7 {\scriptstyle \pm 0.4}$ & $67.1 {\scriptstyle \pm 0.4}$ & $6.2 {\scriptstyle \pm 0.1}$ & $85.3 {\scriptstyle \pm 0.1}$ \\
+\midrule
+C$_u$ & $63.4 {\scriptstyle \pm 0.5}$ & $32.9 {\scriptstyle \pm 0.5}$ & $6.1 {\scriptstyle \pm 0.1}$ & $85.6 {\scriptstyle \pm 0.1}$ \\
+\midrule
+CODI & $89.0 {\scriptstyle \pm 0.5}$ & $6.6 {\scriptstyle \pm 0.3}$ & $10.7 {\scriptstyle \pm 0.2}$ & $30.9 {\scriptstyle \pm 0.3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}

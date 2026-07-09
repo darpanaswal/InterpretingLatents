@@ -1,0 +1,30 @@
+\begin{table*}[!t]
+\centering
+\tiny
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l cccccc cccccc}
+\toprule
+ & \multicolumn{6}{c}{$H/\log_2 N$} & \multicolumn{6}{c}{Top-1 correct (\%)} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+$k$ & B & CoT & PaT & C & C$_u$ & CODI & B & CoT & PaT & C & C$_u$ & CODI \\
+\midrule
+0 & $0.60 {\scriptstyle \pm 0.03}$ & $0.28 {\scriptstyle \pm 0.03}$ & $0.52 {\scriptstyle \pm 0.03}$ & $0.50 {\scriptstyle \pm 0.03}$ & $0.50 {\scriptstyle \pm 0.03}$ & $0.15 {\scriptstyle \pm 0.02}$ & $80.0 {\scriptstyle \pm 3.8}$ & $94.1 {\scriptstyle \pm 2.3}$ & $67.9 {\scriptstyle \pm 4.0}$ & $68.3 {\scriptstyle \pm 4.2}$ & $65.9 {\scriptstyle \pm 4.3}$ & $95.2 {\scriptstyle \pm 2.0}$ \\
+1 & $0.61 {\scriptstyle \pm 0.03}$ & $0.26 {\scriptstyle \pm 0.02}$ & $0.52 {\scriptstyle \pm 0.03}$ & $0.48 {\scriptstyle \pm 0.03}$ & $0.50 {\scriptstyle \pm 0.03}$ & $0.16 {\scriptstyle \pm 0.02}$ & $79.8 {\scriptstyle \pm 3.8}$ & $94.4 {\scriptstyle \pm 2.1}$ & $67.5 {\scriptstyle \pm 4.0}$ & $66.4 {\scriptstyle \pm 4.3}$ & $64.4 {\scriptstyle \pm 4.3}$ & $92.6 {\scriptstyle \pm 2.4}$ \\
+2 & $0.59 {\scriptstyle \pm 0.02}$ & $0.18 {\scriptstyle \pm 0.02}$ & $0.46 {\scriptstyle \pm 0.02}$ & $0.43 {\scriptstyle \pm 0.02}$ & $0.41 {\scriptstyle \pm 0.02}$ & $0.19 {\scriptstyle \pm 0.02}$ & $71.6 {\scriptstyle \pm 4.3}$ & $93.0 {\scriptstyle \pm 2.4}$ & $69.8 {\scriptstyle \pm 4.3}$ & $71.4 {\scriptstyle \pm 4.0}$ & $74.7 {\scriptstyle \pm 3.7}$ & $87.2 {\scriptstyle \pm 2.7}$ \\
+3 & $0.57 {\scriptstyle \pm 0.03}$ & $0.21 {\scriptstyle \pm 0.02}$ & $0.25 {\scriptstyle \pm 0.03}$ & $0.34 {\scriptstyle \pm 0.02}$ & $0.32 {\scriptstyle \pm 0.02}$ & $0.17 {\scriptstyle \pm 0.02}$ & $70.8 {\scriptstyle \pm 4.1}$ & $90.9 {\scriptstyle \pm 2.6}$ & $84.1 {\scriptstyle \pm 3.4}$ & $83.8 {\scriptstyle \pm 3.4}$ & $86.8 {\scriptstyle \pm 3.3}$ & $86.8 {\scriptstyle \pm 3.2}$ \\
+4 & $0.53 {\scriptstyle \pm 0.04}$ & $0.25 {\scriptstyle \pm 0.04}$ & $0.17 {\scriptstyle \pm 0.04}$ & $0.27 {\scriptstyle \pm 0.04}$ & $0.28 {\scriptstyle \pm 0.04}$ & $0.09 {\scriptstyle \pm 0.03}$ & $78.0 {\scriptstyle \pm 5.8}$ & $91.2 {\scriptstyle \pm 4.1}$ & $90.1 {\scriptstyle \pm 4.1}$ & $91.2 {\scriptstyle \pm 4.1}$ & $93.4 {\scriptstyle \pm 3.6}$ & $89.0 {\scriptstyle \pm 4.7}$ \\
+\midrule
+ & \multicolumn{6}{c}{$P(\text{correct})$} & \multicolumn{6}{c}{Cand.\ mass} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+$k$ & B & CoT & PaT & C & C$_u$ & CODI & B & CoT & PaT & C & C$_u$ & CODI \\
+\midrule
+0 & $0.12 {\scriptstyle \pm 0.01}$ & $0.24 {\scriptstyle \pm 0.03}$ & $0.00 {\scriptstyle \pm 0.00}$ & $0.03 {\scriptstyle \pm 0.01}$ & $0.01 {\scriptstyle \pm 0.00}$ & $0.24 {\scriptstyle \pm 0.03}$ & $0.15 {\scriptstyle \pm 0.01}$ & $0.26 {\scriptstyle \pm 0.03}$ & $0.01 {\scriptstyle \pm 0.00}$ & $0.05 {\scriptstyle \pm 0.01}$ & $0.02 {\scriptstyle \pm 0.01}$ & $0.24 {\scriptstyle \pm 0.03}$ \\
+1 & $0.11 {\scriptstyle \pm 0.01}$ & $0.24 {\scriptstyle \pm 0.03}$ & $0.00 {\scriptstyle \pm 0.00}$ & $0.03 {\scriptstyle \pm 0.01}$ & $0.01 {\scriptstyle \pm 0.00}$ & $0.24 {\scriptstyle \pm 0.03}$ & $0.14 {\scriptstyle \pm 0.01}$ & $0.25 {\scriptstyle \pm 0.03}$ & $0.01 {\scriptstyle \pm 0.00}$ & $0.05 {\scriptstyle \pm 0.01}$ & $0.02 {\scriptstyle \pm 0.01}$ & $0.25 {\scriptstyle \pm 0.04}$ \\
+2 & $0.09 {\scriptstyle \pm 0.01}$ & $0.22 {\scriptstyle \pm 0.03}$ & $0.02 {\scriptstyle \pm 0.01}$ & $0.14 {\scriptstyle \pm 0.02}$ & $0.16 {\scriptstyle \pm 0.02}$ & $0.12 {\scriptstyle \pm 0.03}$ & $0.13 {\scriptstyle \pm 0.01}$ & $0.23 {\scriptstyle \pm 0.03}$ & $0.03 {\scriptstyle \pm 0.01}$ & $0.20 {\scriptstyle \pm 0.02}$ & $0.20 {\scriptstyle \pm 0.02}$ & $0.12 {\scriptstyle \pm 0.03}$ \\
+3 & $0.06 {\scriptstyle \pm 0.01}$ & $0.13 {\scriptstyle \pm 0.02}$ & $0.38 {\scriptstyle \pm 0.04}$ & $0.30 {\scriptstyle \pm 0.03}$ & $0.40 {\scriptstyle \pm 0.03}$ & $0.19 {\scriptstyle \pm 0.03}$ & $0.09 {\scriptstyle \pm 0.01}$ & $0.13 {\scriptstyle \pm 0.02}$ & $0.39 {\scriptstyle \pm 0.04}$ & $0.35 {\scriptstyle \pm 0.03}$ & $0.47 {\scriptstyle \pm 0.03}$ & $0.19 {\scriptstyle \pm 0.03}$ \\
+4 & $0.06 {\scriptstyle \pm 0.01}$ & $0.08 {\scriptstyle \pm 0.03}$ & $0.60 {\scriptstyle \pm 0.06}$ & $0.38 {\scriptstyle \pm 0.05}$ & $0.35 {\scriptstyle \pm 0.05}$ & $0.31 {\scriptstyle \pm 0.06}$ & $0.08 {\scriptstyle \pm 0.01}$ & $0.08 {\scriptstyle \pm 0.03}$ & $0.61 {\scriptstyle \pm 0.06}$ & $0.41 {\scriptstyle \pm 0.05}$ & $0.38 {\scriptstyle \pm 0.05}$ & $0.31 {\scriptstyle \pm 0.06}$ \\
+\bottomrule
+\end{tabular}
+\caption{Full standard-probing results across timesteps and models (llama).}
+\label{tab:appendix_bfs_probing_llama}
+\end{table*}
