@@ -7,9 +7,8 @@ set -euo pipefail
 EXPERIMENT="gradient_subspace_predtoken"
 TASK="gsm"
 MODEL_FAMILY="gpt2"
-MODEL="pause"
-MAX_INSTANCES=200
-MAX_NEW=8
+MODEL="codi"
+MAX_NEW=12
 N_GPUS=1
 WALLTIME="12:00:00"
 ########################################
@@ -17,36 +16,44 @@ WALLTIME="12:00:00"
 LOG_DIR="runs/${EXPERIMENT}"
 LOG_FILE="${LOG_DIR}/${TASK}_${MODEL_FAMILY}_${MODEL}.txt"
 
-# If not inside OAR job → submit self
-if [ -z "${OAR_JOB_ID:-}" ]; then
+SCRIPT_PATH="$(readlink -f "$0")"
+
+# If not inside a SLURM job -> submit self
+if [ -z "${SLURM_JOB_ID:-}" ]; then
     mkdir -p "${LOG_DIR}"
-    oarsub \
-        -n "${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
-        -p "network_address='lig-gpu1.imag.fr' OR network_address='lig-gpu2.imag.fr' OR network_address='lig-gpu3.imag.fr' OR network_address='lig-gpu4.imag.fr' OR network_address='lig-gpu5.imag.fr'" \
-        -l /host=1/gpu=${N_GPUS},walltime=${WALLTIME} \
-        -O "${LOG_FILE}" \
-        -E "${LOG_FILE}" \
-        "$0"
+    sbatch \
+        --job-name="${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
+        --output="${LOG_FILE}" \
+        --error="${LOG_FILE}" \
+        --partition=gpu_p13 \
+        --nodes=1 \
+        --ntasks=1 \
+        --cpus-per-task=$((N_GPUS * 4)) \
+        --gres=gpu:${N_GPUS} \
+        --time="${WALLTIME}" \
+        "${SCRIPT_PATH}"
     exit 0
 fi
 
-# Inside OAR job → run experiment
-source primitive/bin/activate
+# Inside SLURM job -> run experiment
+module purge
+module load anaconda-py3/2024.06
+source $WORK/env_cache_guard.sh
+conda activate lrm
 
 > "${LOG_FILE}"
 echo "Task            : ${TASK}"
 echo "Model Family    : ${MODEL_FAMILY}"
 echo "Model           : ${MODEL}"
-echo "Max instances   : ${MAX_INSTANCES}"
 echo "Max new tokens  : ${MAX_NEW}"
 echo "GPUs            : ${N_GPUS}"
 echo "Log file        : ${LOG_FILE}"
 
+# Full test set (no --max_instances).
 python -u -m experiments.ablation.gradient_subspace_predtoken \
     --task "${TASK}" \
     --model_family "${MODEL_FAMILY}" \
     --model "${MODEL}" \
-    --max_instances "${MAX_INSTANCES}" \
     --max_new "${MAX_NEW}" \
     >> "${LOG_FILE}" 2>&1
 

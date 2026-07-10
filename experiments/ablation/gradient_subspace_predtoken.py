@@ -35,11 +35,18 @@ t instead of the (t, t+1) pair.
 
 OUTPUT LAYOUT
 -------------
-    BASE_DIR / outputs / gradient_geometry / <family> / <task> / <model> /
-        bases_predtoken.npz    -- {f"B_t{t}": B_t^pred}
-        gradients_predtoken.npz
+    Predicted-token artefacts go in their OWN tree, separate from the gold
+    gradient_geometry/ outputs:
+
+    BASE_DIR / outputs / gradient_geometry_predtoken / <family>/<task>/<model>/
+        bases.npz              -- {f"B_t{t}": B_t^pred}
+        gradients.npz
         predtoken_comparison.json  -- per-t rank_pred, rank_gold, mean cos^2,
                                       and the full principal-angle spectrum
+
+    The gold bases it compares against are READ from the original tree,
+    BASE_DIR / outputs / gradient_geometry / <family>/<task>/<model>/bases.npz
+    (override with --gold_bases).
 
 USAGE
 -----
@@ -555,15 +562,26 @@ def main():
                         default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--output_dir", type=str, default=None,
+        help="Where to write predicted-token artefacts. Default: "
+             "BASE_DIR/outputs/gradient_geometry_predtoken/"
+             "<family>/<task>/<model>. Kept in a SEPARATE tree from the "
+             "gold gradient_geometry/ outputs so nothing collides.",
+    )
+    parser.add_argument(
         "--gold_bases", type=str, default=None,
         help="Path to the gold bases.npz to compare against. Defaults to "
-             "the standard gradient_geometry/<family>/<task>/<model>/bases.npz",
+             "the standard gradient_geometry/<family>/<task>/<model>/bases.npz "
+             "(the ORIGINAL gold tree, not the predtoken output tree).",
     )
     args = parser.parse_args()
 
     set_seed(args.seed)
 
-    output_dir = (BASE_DIR / "outputs" / "gradient_geometry"
+    # Predicted-token artefacts go in their own tree, fully separate from
+    # the gold gradient_geometry/ outputs.
+    output_dir = (Path(args.output_dir) if args.output_dir else
+                  BASE_DIR / "outputs" / "gradient_geometry_predtoken"
                   / args.model_family / args.task / args.model)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[main] task={args.task}  model={args.model}  family={args.model_family}")
@@ -598,17 +616,22 @@ def main():
     T = args.n_thoughts + 1
 
     # ── Save predicted-token artefacts ─────────────────────────────
-    bases_path = output_dir / "bases_predtoken.npz"
+    # Folder is already the dedicated predtoken tree, so filenames need no
+    # suffix -- they mirror the gold script's names within their own tree.
+    bases_path = output_dir / "bases.npz"
     np.savez(bases_path, **{f"B_t{t}": bases_pred[t] for t in range(T)})
     print(f"\n[main] Saved predicted-token bases -> {bases_path}")
 
-    grads_path = output_dir / "gradients_predtoken.npz"
+    grads_path = output_dir / "gradients.npz"
     np.savez(grads_path, G=G, losses=losses, ranks=np.array(ranks))
     print(f"[main] Saved predicted-token gradients -> {grads_path}")
 
     # ── Load gold bases and compare via principal angles ───────────
+    # Gold lives in the ORIGINAL gradient_geometry/ tree, not our output_dir.
     gold_path = (Path(args.gold_bases) if args.gold_bases
-                 else output_dir / "bases.npz")
+                 else (BASE_DIR / "outputs" / "gradient_geometry"
+                       / args.model_family / args.task / args.model
+                       / "bases.npz"))
     if not gold_path.exists():
         print(f"\n[cmp] gold bases not found at {gold_path}; run "
               f"gradient_subspace.py first. Skipping comparison.")

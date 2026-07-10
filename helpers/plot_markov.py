@@ -90,18 +90,42 @@ def load_jsonl(path: Path):
                 records.append(json.loads(line))
     return records
 
-def discover_results(out_dir: Path):
+def _subspace_source_of(res: dict) -> str:
+    """Which subspace a projected result used.
+
+    New results carry an explicit "subspace_source" ("gold"/"pred").
+    Legacy projected results predate that field and are always gold.
+    """
+    src = res.get("subspace_source")
+    if src in ("gold", "pred"):
+        return src
+    return "gold"
+
+
+def _ci_suffix(proj: bool, source: str) -> str:
+    """Filename suffix mirroring markovianity_test._proj_suffix."""
+    if not proj:
+        return ""
+    return "_subspace" if source == "gold" else "_subspace_pred"
+
+
+def discover_results(out_dir: Path, subspace_source: str = "gold"):
     """
     Returns data[is_projected][task][model] = {
         "point": {predictor: value},
         "ci": {predictor: (low, high)}
     }
 
-    markovianity_test.py writes outputs/markovianity/<family>/results_<model>_<task>.json,
+    The projected (True) slot is populated ONLY by results whose subspace
+    source matches `subspace_source` ("gold" or "pred"), so the appendix
+    table's "Subspace" row shows the requested subspace. The unprojected
+    (False) slot is source-independent.
+
+    markovianity_test.py writes outputs/markovianity/<family>/results_<model>_<task>[suffix].json,
     so `out_dir` is expected to be already family-scoped by the caller.
     """
     data = {False: defaultdict(dict), True: defaultdict(dict)}
-    
+
     # Initialize all keys
     for proj in [False, True]:
         for t in TASK_ORDER:
@@ -112,13 +136,18 @@ def discover_results(out_dir: Path):
     for path in out_dir.glob("results_*.json"):
         res = load_json(path)
         if res is None: continue
-        
+
         task = res["task"]
         model = res["model"]
         proj = res.get("projected", False)
-        
-        # Suffix for CI file
-        suffix = "_subspace" if proj else ""
+
+        # For projected results, keep only the requested subspace source.
+        source = _subspace_source_of(res)
+        if proj and source != subspace_source:
+            continue
+
+        # Suffix for CI file must match the source-aware results suffix.
+        suffix = _ci_suffix(proj, source)
         ci_path = out_dir / f"cis_{model}_{task}{suffix}.jsonl"
         ci_records = load_jsonl(ci_path)
         
@@ -156,10 +185,12 @@ def discover_results(out_dir: Path):
     return data
 
 
-def plot_heatmaps(data, out_path):
+def plot_heatmaps(data, out_path, subspace_source="gold"):
     fig, axes = plt.subplots(2, 2, figsize=(6.0, 4.0))
-    
-    proj_rows = [(False, "Full Thoughts"), (True, "Gradient-Subspace")]
+
+    sub_label = ("Gradient-Subspace" if subspace_source == "gold"
+                 else "Gradient-Subspace (pred)")
+    proj_rows = [(False, "Full Thoughts"), (True, sub_label)]
     
     vmin, vmax = -0.1, 1.0
     
@@ -232,12 +263,18 @@ def plot_heatmaps(data, out_path):
     plt.close(fig)
     print(f"[plot] {out_path}")
 
-def build_appendix_table(data, family, out_path):
+def build_appendix_table(data, family, out_path, subspace_source="gold"):
     # LaTeX formatting functions
     def _fmt_ci(pt, ci):
         if pt is None: return "--"
         if ci is None: return f"{pt:.3f}"
         return f"{pt:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+
+    sub_row_label = ("Subspace" if subspace_source == "gold"
+                     else "Subspace(pred)")
+    src_caption = ("gold-answer gradient subspace" if subspace_source == "gold"
+                   else "predicted-token gradient subspace")
+    src_tag = "" if subspace_source == "gold" else "_pred"
 
     lines = [
         r"\begin{table}[h!]",
@@ -252,7 +289,7 @@ def build_appendix_table(data, family, out_path):
         r"\midrule",
     ]
 
-    proj_rows = [(False, "Full"), (True, "Subspace")]
+    proj_rows = [(False, "Full"), (True, sub_row_label)]
 
     for p_idx, (proj, proj_label) in enumerate(proj_rows):
         for m_idx, model in enumerate(MODEL_ORDER):
@@ -278,8 +315,9 @@ def build_appendix_table(data, family, out_path):
     lines += [
         r"\bottomrule",
         r"\end{tabular}",
-        rf"\caption{{Markovianity $R^2$ at order 1, test-set with 95\% bootstrap CIs ({family}).}}",
-        rf"\label{{tab:markovianity_{family}}}",
+        rf"\caption{{Markovianity $R^2$ at order 1, test-set with 95\% "
+        rf"bootstrap CIs ({family}). Projected row uses the {src_caption}.}}",
+        rf"\label{{tab:markovianity_{family}{src_tag}}}",
         r"\end{table}",
     ]
 
@@ -308,31 +346,46 @@ def main():
                          "found under outputs/markovianity/.")
     ap.add_argument("--tables_dir", default="Tables/statistical",
                     help="Directory for markovianity_<family>.tex files.")
+    ap.add_argument(
+        "--subspace", choices=["gold", "pred"], default="gold",
+        help="Which subspace populates the projected 'Subspace' row: "
+             "'gold' (gradient of gold-answer NLL; default) or 'pred' "
+             "(gradient of the model's own predicted-token NLL). Selects the "
+             "matching results_*[_subspace|_subspace_pred].json files. "
+             "Outputs are namespaced by source so gold and pred coexist.",
+    )
     args = ap.parse_args()
 
     families = ([args.model_family] if args.model_family else discover_families())
     if not families:
         print(f"[WARN] No families found under {OUT_DIR}")
         return
-    print(f"[INFO] Families: {families}")
+    print(f"[INFO] Families: {families}  subspace={args.subspace}")
 
     tables_dir = Path(args.tables_dir)
     tables_dir.mkdir(parents=True, exist_ok=True)
 
+    # Filename tag so gold and pred figures/tables don't overwrite.
+    src_tag = "" if args.subspace == "gold" else "_pred"
+
     for family in families:
         # 1. Point to the actual data directory for this family
         data_dir = OUT_DIR / family
-        data = discover_results(data_dir)
-        
+        data = discover_results(data_dir, subspace_source=args.subspace)
+
         # 2. Ensure your output directory for the plots exists
         plot_dir = Path("Plots/markov")
         plot_dir.mkdir(parents=True, exist_ok=True)
 
         # 3. Save the plots and tables
-        plot_heatmaps(data, plot_dir / f"markov_heatmaps_{family}.pdf")
-        
-        out_path = tables_dir / f"markovianity_{family}.tex"
-        build_appendix_table(data, family, out_path)
+        plot_heatmaps(
+            data, plot_dir / f"markov_heatmaps_{family}{src_tag}.pdf",
+            subspace_source=args.subspace,
+        )
+
+        out_path = tables_dir / f"markovianity_{family}{src_tag}.tex"
+        build_appendix_table(data, family, out_path,
+                             subspace_source=args.subspace)
 
 
 if __name__ == "__main__":

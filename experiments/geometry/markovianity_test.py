@@ -305,18 +305,34 @@ def load_thoughts(task, model, n_thoughts, device,
 # Subspace projection
 # ═══════════════════════════════════════════════════════════════════
 
-def _bases_path(task, model, family="gpt2"):
-    # Must match gradient_subspace.py's output layout.
-    return (BASE_DIR / "outputs" / "gradient_geometry"
+# Subspace source -> on-disk tree.
+#   "gold": gradient_geometry/            (gradient of gold-answer NLL)
+#   "pred": gradient_geometry_predtoken/  (gradient of model's own argmax NLL)
+_SUBSPACE_ROOT = {
+    "gold": "gradient_geometry",
+    "pred": "gradient_geometry_predtoken",
+}
+
+
+def _bases_path(task, model, family="gpt2", subspace_source="gold"):
+    # Must match the layout written by gradient_subspace.py (gold) /
+    # gradient_subspace_predtoken.py (pred).
+    root = _SUBSPACE_ROOT[subspace_source]
+    return (BASE_DIR / "outputs" / root
             / family / task / model / "bases.npz")
 
 
-def load_bases(task, model, bases_path=None, family="gpt2"):
-    path = Path(bases_path) if bases_path else _bases_path(task, model, family=family)
+def load_bases(task, model, bases_path=None, family="gpt2",
+               subspace_source="gold"):
+    path = (Path(bases_path) if bases_path
+            else _bases_path(task, model, family=family,
+                             subspace_source=subspace_source))
     if not path.exists():
+        gen = ("gradient_subspace.py" if subspace_source == "gold"
+               else "gradient_subspace_predtoken.py")
         raise FileNotFoundError(
             f"bases.npz not found at {path}. "
-            f"Run gradient_subspace.py for --task {task} --model {model} "
+            f"Run {gen} for --task {task} --model {model} "
             f"--model_family {family}."
         )
     blob = np.load(path)
@@ -329,6 +345,18 @@ def load_bases(task, model, bases_path=None, family="gpt2"):
     print(f"[INFO] loaded bases from {path}: ranks "
           f"{[bases[t].shape[1] for t in sorted(bases)]}")
     return bases
+
+
+def _proj_suffix(project_to_subspace, subspace_source):
+    """Filename suffix for a run.
+
+    off              -> ""
+    gold projection  -> "_subspace"       (legacy name; back-compatible)
+    pred projection  -> "_subspace_pred"
+    """
+    if not project_to_subspace:
+        return ""
+    return "_subspace" if subspace_source == "gold" else "_subspace_pred"
 
 
 def project_thoughts_per_t(thoughts, bases):
@@ -605,13 +633,16 @@ def identity_prediction(thoughts_eval, order, drop_h0=True, skip_ts=None):
 def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
         n_thoughts=6, batch_size=32, max_train_instances=None,
         num_gpus=1, seed=0, project_to_subspace=False, bases_path=None,
-        out_dir=None, mlp_seeds=None, n_boot=1000, family="gpt2"):
+        out_dir=None, mlp_seeds=None, n_boot=1000, family="gpt2",
+        subspace_source="gold"):
 
     if mlp_seeds is None:
         mlp_seeds = [0, 1, 2]
 
+    proj_tag = (f"  [SUBSPACE-PROJECTED: {subspace_source}]"
+                if project_to_subspace else "")
     print(f"\n{'='*64}\n  task={task}  model={model}  family={family}"
-          + ("  [SUBSPACE-PROJECTED]" if project_to_subspace else "")
+          + proj_tag
           + f"\n{'='*64}")
 
     train, test = load_thoughts(task, model, n_thoughts=n_thoughts,
@@ -623,7 +654,8 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
     skip_ts = []
 
     if project_to_subspace:
-        bases = load_bases(task, model, bases_path=bases_path, family=family)
+        bases = load_bases(task, model, bases_path=bases_path, family=family,
+                           subspace_source=subspace_source)
         train = project_thoughts_per_t(train, bases)
         test = project_thoughts_per_t(test, bases)
 
@@ -639,8 +671,10 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
 
     max_order = Kp1 - 1 - (1 if drop_h0 else 0)
 
-    # Bootstrap CI output path (sibling to the results JSON)
-    suffix = "_subspace" if project_to_subspace else ""
+    # Bootstrap CI output path (sibling to the results JSON).
+    # Gold projection keeps the legacy "_subspace" suffix for back-compat;
+    # predtoken projection uses "_subspace_pred" so the two sit side-by-side.
+    suffix = _proj_suffix(project_to_subspace, subspace_source)
     ci_dir = out_dir if out_dir else BASE_DIR / "outputs" / "markovianity"
     cis_jsonl = str(Path(ci_dir) / f"cis_{model}_{task}{suffix}.jsonl")
 
@@ -650,6 +684,10 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
         "model_family": family,
         "drop_h0": drop_h0,
         "projected": bool(project_to_subspace),
+        # Which subspace was projected onto (only meaningful when projected):
+        #   "gold" = gradient of gold-answer NLL
+        #   "pred" = gradient of model's own predicted-token NLL
+        "subspace_source": (subspace_source if project_to_subspace else None),
         "K_plus_1": int(Kp1),
         "D": int(train.shape[2]),
         "n_train": int(train.shape[0]),
@@ -787,7 +825,9 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
         # ─── Bootstrap CIs on test-split metrics ────────────────────
         ci_ctx = {"task": task, "model": model, "model_family": family,
                   "order": order,
-                  "projected": bool(project_to_subspace)}
+                  "projected": bool(project_to_subspace),
+                  "subspace_source": (subspace_source
+                                      if project_to_subspace else None)}
 
         # Identity and linear_shared: deterministic, single CI as before
         for label, m_te in [("identity", m_id_te), ("linear_shared", m_lin_te)]:
@@ -904,18 +944,30 @@ def main():
                         help="Subsample + shuffle seed.")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument(
-        "--project_to_subspace", type=str, choices=["off", "on", "both"],
+        "--project_to_subspace", type=str,
+        choices=["off", "on", "both", "pred", "pred_only", "all"],
         default="off",
-        help="Project thoughts onto the per-t gradient subspace B_t "
-             "(loaded from gradient_geometry/<task>/<model>/bases.npz) "
-             "before fitting / baselines / evaluation. Modes: 'off' (default), "
-             "'on', or 'both'. Output filenames get a `_subspace` suffix "
-             "so projected and unprojected results sit side-by-side.",
+        help="Project thoughts onto the per-t gradient subspace B_t before "
+             "fitting / baselines / evaluation. The subspace source can be "
+             "the gold-answer gradient ('gold', from gradient_geometry/) or "
+             "the model's own predicted-token gradient ('pred', from "
+             "gradient_geometry_predtoken/). Modes and the runs they produce:\n"
+             "  off       -> [full]                (no projection; default)\n"
+             "  on        -> [gold]                (gold subspace only)\n"
+             "  both      -> [full, gold]          (legacy default pair)\n"
+             "  pred      -> [full, pred]          (predtoken subspace + full)\n"
+             "  pred_only -> [pred]                (ONLY the predtoken subspace;\n"
+             "                                      skips full + gold reruns)\n"
+             "  all       -> [full, gold, pred]    (everything)\n"
+             "Projected runs get a `_subspace` (gold) or `_subspace_pred` "
+             "(pred) filename suffix so all variants sit side-by-side.",
     )
     parser.add_argument(
         "--bases_path", type=str, default=None,
         help="Override path to bases.npz. Default: "
-             "BASE_DIR/outputs/gradient_geometry/<family>/<task>/<model>/bases.npz",
+             "BASE_DIR/outputs/<gradient_geometry|gradient_geometry_predtoken>"
+             "/<family>/<task>/<model>/bases.npz, chosen by the projection "
+             "mode's subspace source. Applies to single-source modes only.",
     )
     parser.add_argument("--n_boot", type=int, default=1000,
                     help="Number of bootstrap iterations.")
@@ -952,18 +1004,35 @@ def main():
         BASE_DIR / "outputs" / "markovianity" / args.model_family
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.project_to_subspace == "both":
-        proj_modes = [False, True]
-    elif args.project_to_subspace == "on":
-        proj_modes = [True]
+    # Each plan is (project_to_subspace: bool, subspace_source: str).
+    # subspace_source is ignored when project_to_subspace is False.
+    PLANS = {
+        "off":       [(False, "gold")],
+        "on":        [(True,  "gold")],
+        "both":      [(False, "gold"), (True, "gold")],
+        "pred":      [(False, "gold"), (True, "pred")],
+        "pred_only": [(True,  "pred")],
+        "all":       [(False, "gold"), (True, "gold"), (True, "pred")],
+    }
+    run_plans = PLANS[args.project_to_subspace]
+
+    # --bases_path is a single path; it can only safely apply when the mode
+    # has exactly one projected source. For multi-source modes (both/pred/all)
+    # ignore it and let each source resolve its own default tree.
+    n_projected = sum(1 for p, _ in run_plans if p)
+    if args.bases_path and n_projected != 1:
+        print(f"[WARN] --bases_path ignored for mode "
+              f"'{args.project_to_subspace}' (has {n_projected} projected "
+              f"sources); each resolves its own default bases.npz.")
+        effective_bases_path = None
     else:
-        proj_modes = [False]
+        effective_bases_path = args.bases_path
 
     all_results = []
     for task in tasks:
         for model in models:
-            for proj_mode in proj_modes:
-                suffix = "_subspace" if proj_mode else ""
+            for proj_mode, source in run_plans:
+                suffix = _proj_suffix(proj_mode, source)
                 res = run(
                     task=task, model=model,
                     orders=sorted(args.orders),
@@ -973,11 +1042,12 @@ def main():
                     max_train_instances=args.max_train_instances,
                     num_gpus=args.num_gpus, seed=args.seed,
                     project_to_subspace=proj_mode,
-                    bases_path=args.bases_path,
+                    bases_path=(effective_bases_path if proj_mode else None),
                     out_dir=out_dir,
                     mlp_seeds=args.mlp_seeds,
                     n_boot=args.n_boot,
                     family=args.model_family,
+                    subspace_source=source,
                 )
                 out_path = out_dir / f"results_{model}_{task}{suffix}.json"
                 with open(out_path, "w") as f:

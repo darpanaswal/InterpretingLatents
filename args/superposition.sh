@@ -14,21 +14,31 @@ WALLTIME="02:00:00"
 LOG_DIR="runs/${EXPERIMENT}"
 LOG_FILE="${LOG_DIR}/${MODEL_FAMILY}_${MODE}.txt"
 
-# If not inside OAR job → submit self
-if [ -z "${OAR_JOB_ID:-}" ]; then
+SCRIPT_PATH="$(readlink -f "$0")"
+
+# If not inside a SLURM job -> submit self
+if [ -z "${SLURM_JOB_ID:-}" ]; then
     mkdir -p "${LOG_DIR}"
-    oarsub \
-        -n "${EXPERIMENT}_${MODEL_FAMILY}_${MODE}" \
-        -p "network_address='lig-gpu1.imag.fr' OR network_address='lig-gpu2.imag.fr' OR network_address='lig-gpu3.imag.fr' OR network_address='lig-gpu4.imag.fr' OR network_address='lig-gpu5.imag.fr' OR network_address='lig-gpu6.imag.fr'" \
-        -l /host=1/gpu=${N_GPUS},walltime=${WALLTIME} \
-        -O "${LOG_FILE}" \
-        -E "${LOG_FILE}" \
-        "$0"
+    sbatch \
+        --job-name="${EXPERIMENT}_${MODEL_FAMILY}_${MODE}" \
+        --output="${LOG_FILE}" \
+        --error="${LOG_FILE}" \
+        --partition=gpu_p13 \
+        --nodes=1 \
+        --ntasks=1 \
+        --cpus-per-task=$((N_GPUS * 4)) \
+        --gres=gpu:${N_GPUS} \
+        --time="${WALLTIME}" \
+        "${SCRIPT_PATH}"
     exit 0
 fi
 
-# Inside OAR job → run experiment
-source primitive/bin/activate
+
+# Inside SLURM job -> run experiment
+module purge
+module load anaconda-py3/2024.06
+source $WORK/env_cache_guard.sh
+conda activate lrm
 
 > "${LOG_FILE}"
 echo "Model Family    : ${MODEL_FAMILY}"

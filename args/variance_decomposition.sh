@@ -13,21 +13,31 @@ WALLTIME="02:00:00"
 LOG_DIR="runs/variance_decomposition"
 LOG_FILE="${LOG_DIR}/${MODEL_FAMILY}.txt"
 
-# If not inside OAR job → submit self
-if [ -z "${OAR_JOB_ID:-}" ]; then
+SCRIPT_PATH="$(readlink -f "$0")"
+
+# If not inside a SLURM job -> submit self
+if [ -z "${SLURM_JOB_ID:-}" ]; then
     mkdir -p "${LOG_DIR}"
-    oarsub \
-        -n "${EXPERIMENT}" \
-        -p "network_address='lig-gpu7.imag.fr'" \
-        -l /host=1/gpu=${N_GPUS},walltime=${WALLTIME} \
-        -O "${LOG_FILE}" \
-        -E "${LOG_FILE}" \
-        "$0"
+    sbatch \
+        --job-name="${EXPERIMENT}" \
+        --output="${LOG_FILE}" \
+        --error="${LOG_FILE}" \
+        --partition=gpu_p13 \
+        --nodes=1 \
+        --ntasks=1 \
+        --cpus-per-task=$((N_GPUS * 4)) \
+        --gres=gpu:${N_GPUS} \
+        --time="${WALLTIME}" \
+        "${SCRIPT_PATH}"
     exit 0
 fi
 
-# Inside OAR job → run experiment
-source primitive/bin/activate
+
+# Inside SLURM job -> run experiment
+module purge
+module load anaconda-py3/2024.06
+source $WORK/env_cache_guard.sh
+conda activate lrm
 
 > "${LOG_FILE}"
 echo "Running variance decomposition for all"
