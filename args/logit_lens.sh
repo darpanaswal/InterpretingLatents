@@ -25,7 +25,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         --job-name="${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
         --output="${LOG_FILE}" \
         --error="${LOG_FILE}" \
-        --partition=gpu_p13 \
+        --partition=gpu_p2 \
         --nodes=1 \
         --ntasks=1 \
         --cpus-per-task=$((N_GPUS * 4)) \
