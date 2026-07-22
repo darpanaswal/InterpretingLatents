@@ -119,7 +119,7 @@ def load_train_thoughts(task, model, family="gpt2"):
     if not path.exists():
         raise FileNotFoundError(
             f"Train thoughts not found at {path}. "
-            f"Run markovianity_test.py (extracts train thoughts) for "
+            f"Run extract_thoughts.py --split train for "
             f"--task {task} --model {model} --model_family {family}."
         )
     blob = torch.load(path, map_location="cpu", weights_only=False)

@@ -16,17 +16,21 @@ LOG_FILE="${LOG_DIR}/${MODEL_FAMILY}.txt"
 # If not inside OAR job → submit self
 if [ -z "${OAR_JOB_ID:-}" ]; then
     mkdir -p "${LOG_DIR}"
+    SNAPSHOT="$(mktemp "${LOG_DIR}/.snapshot.XXXXXX.sh")"
+    cp "$0" "${SNAPSHOT}"
+    chmod +x "${SNAPSHOT}"
     oarsub \
         -n "${EXPERIMENT}" \
         -p "network_address='lig-gpu7.imag.fr'" \
         -l /host=1/gpu=${N_GPUS},walltime=${WALLTIME} \
         -O "${LOG_FILE}" \
         -E "${LOG_FILE}" \
-        "$0"
+        "${SNAPSHOT}"
     exit 0
 fi
 
 # Inside OAR job → run experiment
+rm -f "$0"
 source primitive/bin/activate
 
 > "${LOG_FILE}"

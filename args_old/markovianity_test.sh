@@ -7,8 +7,8 @@ set -euo pipefail
 EXPERIMENT="markovianity_test"
 TASK="gsm"
 MODEL_FAMILY="llama"
-MODEL="codi"
-PROJECT_TO_SUBSPACE="both"
+MODEL="coconut_u"
+PROJECT_TO_SUBSPACE="all"
 N_GPUS=1
 WALLTIME="10:00:00"
 ########################################
@@ -19,18 +19,25 @@ LOG_FILE="${LOG_DIR}/${TASK}_${MODEL_FAMILY}_${MODEL}.txt"
 # If not inside OAR job → submit self
 if [ -z "${OAR_JOB_ID:-}" ]; then
     mkdir -p "${LOG_DIR}"
+    SNAPSHOT="$(mktemp "${LOG_DIR}/.snapshot.XXXXXX.sh")"
+    cp "$0" "${SNAPSHOT}"
+    chmod +x "${SNAPSHOT}"
     oarsub \
         -n "${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
-        -p "network_address='lig-gpu7.imag.fr' OR network_address='lig-gpu8.imag.fr' OR network_address='lig-gpu9.imag.fr' OR network_address='lig-gpu10.imag.fr'" \
+        -p "network_address='lig-gpu1.imag.fr' OR network_address='lig-gpu2.imag.fr' OR network_address='lig-gpu3.imag.fr' OR network_address='lig-gpu4.imag.fr' OR network_address='lig-gpu5.imag.fr' OR network_address='lig-gpu6.imag.fr'" \
         -l /host=1/gpu=${N_GPUS},walltime=${WALLTIME} \
         -O "${LOG_FILE}" \
         -E "${LOG_FILE}" \
-        "$0"
+        "${SNAPSHOT}"
     exit 0
 fi
 
 # Inside OAR job → run experiment
+rm -f "$0"
 source primitive/bin/activate
+
+echo "Cgroup mem limit: $(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 'n/a') bytes"
+free -h
 
 > "${LOG_FILE}"
 echo "Task            : ${TASK}"
@@ -44,8 +51,7 @@ python -u -m experiments.geometry.markovianity_test \
     --task "${TASK}" \
     --model "${MODEL}" \
     --model_family "${MODEL_FAMILY}" \
-    --num_gpus "${N_GPUS}" \
     --project_to_subspace "${PROJECT_TO_SUBSPACE}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash args/markovianity_test.sh
+# TO RUN, COPY: bash args_old/markovianity_test.sh

@@ -18,13 +18,19 @@ Usage:
 """
 
 import json
+import queue
 import torch
 import argparse
+import tempfile
+import torch.multiprocessing as mp
 from pathlib import Path
 from transformers import AutoTokenizer
-from src.utils import is_pause_model, setup_model_and_tokenizer, setup_codi_model
+from src.utils import (
+    is_pause_model, setup_model_and_tokenizer, setup_codi_model,
+    _shard_indices,
+)
 from src.config import (
-    PROSQA_TEST, GSM_TEST, THOUGHTS
+    PROSQA_TRAIN, PROSQA_TEST, GSM_TRAIN, GSM_TEST, THOUGHTS
 )
 from src.bootstrap_stats import (
        report_mean_with_ci,
@@ -37,13 +43,19 @@ from src.bootstrap_stats import (
 # Data Formatting
 # ═══════════════════════════════════════════════════════════════════
 
-def load_data(task, max_instances=None):
-    path = PROSQA_TEST if task == "prosqa" else GSM_TEST
+def _data_path(task, split):
+    if task == "prosqa":
+        return PROSQA_TRAIN if split == "train" else PROSQA_TEST
+    return GSM_TRAIN if split == "train" else GSM_TEST
+
+
+def load_data(task, split="test", max_instances=None):
+    path = _data_path(task, split)
     with open(path, "r") as f:
         data = json.load(f)
     if max_instances:
         data = data[:max_instances]
-    print(f"[INFO] Loaded {len(data)} {task} instances from {path}")
+    print(f"[INFO] Loaded {len(data)} {task} ({split}) instances from {path}")
     return data
 
 # ═══════════════════════════════════════════════════════════════════
@@ -535,6 +547,184 @@ def extract_thoughts_codi_batch(
     return all_thoughts
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Multi-GPU: instance-sharded extraction
+# ═══════════════════════════════════════════════════════════════════
+#
+# Mirrors the mp.Process + Queue pattern in
+# experiments/ablation/gradient_subspace_interventions.py: each rank
+# loads its own model copy on cuda:{rank} ONCE, extracts thoughts for
+# its shard of instances, and returns the shard (+ its original
+# indices) via a Queue. The parent scatters shards back into a single
+# (N, K+1, D) tensor ordered like the input data.
+#
+# `splits_data` is a list of (split_name, data) pairs so that, with
+# --split both, one worker set is spawned and the model loaded once per
+# GPU, then reused for both the test-split and train-split shards —
+# instead of respawning processes / reloading the model a second time
+# (each split has its own shard sizes, since test/train differ in
+# length, so sharding is still done per split inside the worker).
+#
+# Shards are exchanged via disk, NOT through the mp.Queue directly. A
+# train shard can be multi-GB (e.g. ~24k llama-family instances x 7 x
+# 2048 floats); torch.multiprocessing's fd-based tensor IPC (used when a
+# large CPU tensor is put() into a Queue) has been observed to raise a
+# spurious EOFError / ConnectionResetError under load, which is NOT a
+# queue.Empty and so was propagating out of the polling loop below and
+# killing the parent before any shard could be collected/saved — even
+# though the workers themselves had finished (or nearly finished)
+# extraction. Sending only small metadata (paths + indices) through the
+# Queue and torch.save()/torch.load()-ing the actual tensors sidesteps
+# that IPC race entirely.
+
+def _extract_thoughts_worker(
+    rank, world_size, task, model_name, model_family, n_thoughts,
+    splits_data, batch_size, tmp_dir, return_queue,
+):
+    device = f"cuda:{rank}"
+    torch.cuda.set_device(rank)
+    K = n_thoughts
+
+    is_codi = (model_name == "codi")
+    if is_codi:
+        codi_dict = setup_codi_model(task, device, family=model_family)
+    else:
+        coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = \
+            setup_model_and_tokenizer(task, model_name, device, family=model_family)
+        D = getattr(base_model.config, "n_embd",
+                    getattr(base_model.config, "hidden_size", None))
+        if D is None:
+            raise RuntimeError("Could not determine hidden size from model config")
+
+    meta = {}
+    for split_name, data in splits_data:
+        indices = _shard_indices(len(data), world_size, rank)
+        shard_data = [data[i] for i in indices]
+        print(f"[rank {rank}] split={split_name}: processing "
+              f"{len(shard_data)} instances on {device}", flush=True)
+
+        if is_codi:
+            thoughts = extract_thoughts_codi_batch(
+                codi_dict, shard_data, K, device, batch_size=batch_size,
+                verbose=(rank == 0),
+            )
+        else:
+            thoughts = torch.zeros(len(shard_data), K + 1, D)
+            for local_idx, sample in enumerate(shard_data):
+                if local_idx % 50 == 0:
+                    print(f"[rank {rank}] split={split_name} "
+                          f"{local_idx}/{len(shard_data)}", flush=True)
+                thoughts[local_idx] = extract_thoughts_single_instance(
+                    coconut_model, base_model, tokenizer, sample, K, device,
+                    start_id, latent_id, end_id,
+                )
+
+        shard_path = tmp_dir / f"shard_r{rank}_{split_name}.pt"
+        torch.save(thoughts, shard_path)
+        meta[split_name] = {"indices": indices, "path": str(shard_path)}
+        print(f"[rank {rank}] split={split_name}: saved shard -> {shard_path}",
+              flush=True)
+
+    return_queue.put({"rank": rank, "meta": meta})
+
+
+def extract_thoughts_multigpu(
+    task, model_name, model_family, n_thoughts, splits_data, n_gpus,
+    batch_size=32,
+):
+    """
+    Spawn n_gpus workers ONCE; each loads its own model copy on cuda:{rank}
+    and extracts thoughts for its shard of every split in `splits_data`
+    (a list of (split_name, data) pairs).
+
+    Returns: dict {split_name: (N_split, K+1, D) tensor ordered like the
+    corresponding `data`}.
+    """
+    # Shard files land under THOUGHTS (project storage), not the default
+    # system temp dir: a compute node's /tmp is sometimes small or tmpfs
+    # (RAM-backed), and a llama train shard can be multi-GB — writing
+    # several of those concurrently risks filling /tmp outright, which
+    # would be a second, dumber way to lose a run.
+    THOUGHTS.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="extract_thoughts_shards_",
+                                    dir=str(THOUGHTS)))
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = []
+    for rank in range(n_gpus):
+        p = ctx.Process(
+            target=_extract_thoughts_worker,
+            args=(rank, n_gpus, task, model_name, model_family, n_thoughts,
+                  splits_data, batch_size, tmp_dir, q),
+        )
+        p.start()
+        procs.append(p)
+
+    def _kill_all_workers():
+        # On any fatal error below, stop every worker instead of leaving
+        # survivors to keep burning GPU-hours for a result nobody will
+        # ever collect — exactly what happened before this fix existed.
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+        for p in procs:
+            p.join(timeout=10)
+
+    shards = []
+    try:
+        for _ in range(n_gpus):
+            while True:
+                try:
+                    res = q.get(timeout=5.0)
+                    shards.append(res)
+                    break
+                except queue.Empty:
+                    for p in procs:
+                        if not p.is_alive() and p.exitcode != 0:
+                            raise RuntimeError(
+                                f"Worker process {p.pid} crashed with exit code {p.exitcode}. "
+                                "Check console for CUDA Out-Of-Memory or other runtime errors."
+                            )
+                except (EOFError, ConnectionResetError, BrokenPipeError) as e:
+                    # Transient IPC hiccup on the (now tiny) metadata
+                    # message. Only a small dict travels through the queue
+                    # now, so retrying is safe and cheap; treat a dead
+                    # worker the same way as the queue.Empty branch above.
+                    print(f"[WARN] transient queue receive error ({e!r}); "
+                          "retrying...", flush=True)
+                    for p in procs:
+                        if not p.is_alive() and p.exitcode != 0:
+                            raise RuntimeError(
+                                f"Worker process {p.pid} crashed with exit code {p.exitcode}. "
+                                "Check console for CUDA Out-Of-Memory or other runtime errors."
+                            )
+    except BaseException:
+        _kill_all_workers()
+        raise
+
+    for p in procs:
+        p.join()
+
+    K = n_thoughts
+    all_thoughts = {}
+    for split_name, data in splits_data:
+        split_thoughts = None
+        for shard in shards:
+            r = shard["meta"][split_name]
+            shard_tensor = torch.load(r["path"], map_location="cpu",
+                                      weights_only=False)
+            if split_thoughts is None:
+                D = shard_tensor.shape[-1]
+                split_thoughts = torch.zeros(len(data), K + 1, D)
+            for local_idx, idx in enumerate(r["indices"]):
+                split_thoughts[idx] = shard_tensor[local_idx]
+            Path(r["path"]).unlink(missing_ok=True)
+        all_thoughts[split_name] = split_thoughts
+
+    tmp_dir.rmdir()
+    return all_thoughts
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Extract continuous thought vectors from Coconut/CODI model."
@@ -559,9 +749,23 @@ def main():
         help="Base model family. Determines checkpoint paths, dtype, and "
              "prompt formatting (Llama uses the chat template).",
     )
+    parser.add_argument(
+        "--split", type=str, choices=["test", "train", "both"], default="test",
+        help="Which data split(s) to extract thoughts from: 'test' (default; "
+             "matches evaluation instances), 'train', or 'both' (extracts "
+             "both in one run, sharing a single loaded model / worker set). "
+             "Train-split thoughts are saved with a '_train' filename "
+             "suffix, matching the layout expected by mean_ablation.py / "
+             "markovianity_test.py.",
+    )
     parser.add_argument("--n_thoughts", type=int, default=6)
     parser.add_argument("--max_instances", type=int, default=None)
-    parser.add_argument("--output_path", type=str, default=None)
+    parser.add_argument(
+        "--output_path", type=str, default=None,
+        help="Only valid with --split test or --split train (a single "
+             "output file). With --split both, output paths are always "
+             "the default per-split paths, since two files are produced.",
+    )
     parser.add_argument(
         "--batch_size", type=int, default=32,
         help="Batch size for CODI extraction (ignored for coconut/pause, "
@@ -572,71 +776,104 @@ def main():
         "--device", type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
     )
+    parser.add_argument(
+        "--n_gpus", type=int, default=1,
+        help="If >1, shard instances across GPUs 0..n_gpus-1, each loading "
+             "its own model copy (mirrors gradient_subspace_interventions.py).",
+    )
     args = parser.parse_args()
 
-    prosqa_path = str(PROSQA_TEST)
-    gsm_path = str(GSM_TEST)
-    # Namespace by family so gpt2 and llama runs don't clobber each other.
-    output_path = args.output_path or str(
-        THOUGHTS / f"{args.model_family}/{args.task}/thoughts_{args.model}.pt"
-    )
+    if args.split == "both" and args.output_path is not None:
+        parser.error("--output_path cannot be used with --split both "
+                     "(two files are produced; use the default paths).")
+
+    splits = ["test", "train"] if args.split == "both" else [args.split]
+
+    def _output_path(split):
+        if args.output_path is not None:
+            return args.output_path
+        suffix = "_train" if split == "train" else ""
+        # Namespace by family so gpt2 and llama runs don't clobber each other.
+        return str(
+            THOUGHTS / f"{args.model_family}/{args.task}/"
+            f"thoughts_{args.model}{suffix}.pt"
+        )
 
     print(f"[INFO] Model: {args.model}  Family: {args.model_family}")
-    if args.task == "prosqa":
-        print(f"[INFO] ProsQA data: {prosqa_path}")
-    else:
-        print(f"[INFO] GSM8k data: {gsm_path}")
+    print(f"[INFO] Task: {args.task}  Split(s): {splits}")
     print(f"[INFO] Recurrence steps K={args.n_thoughts}")
-    print(f"[INFO] Device: {args.device}")
+    print(f"[INFO] GPUs: {args.n_gpus}")
 
-    # Initialize models based on model type
-    is_codi = (args.model == "codi")
-    if is_codi:
-        codi_dict = setup_codi_model(args.task, args.device, family=args.model_family)
-        D = codi_dict['hidden_size']
-    else:
-        coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = setup_model_and_tokenizer(
-            args.task, args.model, args.device, family=args.model_family
-        )
-        # GPT-2 exposes `n_embd`; Llama exposes `hidden_size`.
-        D = getattr(base_model.config, "n_embd",
-                    getattr(base_model.config, "hidden_size", None))
-        if D is None:
-            raise RuntimeError("Could not determine hidden size from model config")
-
-    data = load_data(args.task, args.max_instances)
-    N = len(data)
     K = args.n_thoughts
+    is_codi = (args.model == "codi")
+    data_by_split = {s: load_data(args.task, s, args.max_instances) for s in splits}
 
-    if is_codi:
-        # Batched: one call does the whole dataset, internally chunked.
-        print(f"[INFO] CODI batched extraction (batch_size={args.batch_size})")
-        all_thoughts = extract_thoughts_codi_batch(
-            codi_dict, data, K, args.device,
+    if args.n_gpus > 1:
+        total_n = sum(len(d) for d in data_by_split.values())
+        print(f"[INFO] Multi-GPU: sharding {total_n} instances across "
+              f"{args.n_gpus} GPUs (model loaded once per GPU, shared "
+              f"across split(s) {splits})")
+        thoughts_by_split = extract_thoughts_multigpu(
+            args.task, args.model, args.model_family, K,
+            list(data_by_split.items()), args.n_gpus,
             batch_size=args.batch_size,
         )
     else:
-        all_thoughts = torch.zeros(N, K + 1, D)
-        for idx, sample in enumerate(data):
-            if idx % 50 == 0:
-                print(f"[INFO] Processing instance {idx}/{N}")
-            thoughts = extract_thoughts_single_instance(
-                coconut_model, base_model, tokenizer, sample, K, args.device,
-                start_id, latent_id, end_id,
+        print(f"[INFO] Device: {args.device}")
+        # Initialize the model ONCE, reused across every split.
+        if is_codi:
+            codi_dict = setup_codi_model(args.task, args.device, family=args.model_family)
+            D = codi_dict['hidden_size']
+        else:
+            coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ = setup_model_and_tokenizer(
+                args.task, args.model, args.device, family=args.model_family
             )
-            all_thoughts[idx] = thoughts
+            # GPT-2 exposes `n_embd`; Llama exposes `hidden_size`.
+            D = getattr(base_model.config, "n_embd",
+                        getattr(base_model.config, "hidden_size", None))
+            if D is None:
+                raise RuntimeError("Could not determine hidden size from model config")
 
-    save_dict = {
-        "thoughts": all_thoughts,
-        "instance_indices": list(range(N)),
-        "n_thoughts": K,
-        "model": args.model,
-        "model_family": args.model_family,
-        "data_path": prosqa_path if args.task == "prosqa" else gsm_path,
-    }
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(save_dict, output_path)
-    print(f"[INFO] Saved {N} x {K+1} x {D} thought vectors to {output_path}")
+        thoughts_by_split = {}
+        for split, data in data_by_split.items():
+            N = len(data)
+            if is_codi:
+                # Batched: one call does the whole dataset, internally chunked.
+                print(f"[INFO] split={split}: CODI batched extraction "
+                      f"(batch_size={args.batch_size})")
+                thoughts_by_split[split] = extract_thoughts_codi_batch(
+                    codi_dict, data, K, args.device,
+                    batch_size=args.batch_size,
+                )
+            else:
+                all_thoughts = torch.zeros(N, K + 1, D)
+                for idx, sample in enumerate(data):
+                    if idx % 50 == 0:
+                        print(f"[INFO] split={split}: Processing instance {idx}/{N}")
+                    thoughts = extract_thoughts_single_instance(
+                        coconut_model, base_model, tokenizer, sample, K, args.device,
+                        start_id, latent_id, end_id,
+                    )
+                    all_thoughts[idx] = thoughts
+                thoughts_by_split[split] = all_thoughts
+
+    for split, data in data_by_split.items():
+        all_thoughts = thoughts_by_split[split]
+        N, Kp1, D = all_thoughts.shape
+        output_path = _output_path(split)
+        save_dict = {
+            "thoughts": all_thoughts,
+            "instance_indices": list(range(N)),
+            "n_thoughts": K,
+            "model": args.model,
+            "model_family": args.model_family,
+            "data_path": str(_data_path(args.task, split)),
+            "split": split,
+        }
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(save_dict, output_path)
+        print(f"[INFO] split={split}: Saved {N} x {Kp1} x {D} thought "
+              f"vectors to {output_path}")
 
 if __name__ == "__main__":
     main()

@@ -11,8 +11,8 @@ print(BASE_DIR)
 
 login(token=hf_token)
 
-REPO_ID = "thomas-ferraz/model_name-CODI-GSM8kAug-Apr28/checkpoint-62979"
-LOCAL_DIR = f"{BASE_DIR}/model/gsm/llama/codi"
+REPO_ID = "thomas-ferraz/model_name-coconut-u0.3-FF-GSM8kAug-Jul9-ckpt17"
+LOCAL_DIR = f"{BASE_DIR}/model/gsm/llama/coconut_u"
 
 
 def smart_download(repo_id, local_dir, **kw):

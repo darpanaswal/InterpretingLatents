@@ -12,11 +12,12 @@ WALLTIME="20:00:00"
 LOG_DIR="runs/${EXPERIMENT}"
 LOG_FILE="${LOG_DIR}.txt"
 
-SCRIPT_PATH="$(readlink -f "$0")"
-
 # If not inside a SLURM job -> submit self
 if [ -z "${SLURM_JOB_ID:-}" ]; then
     mkdir -p "${LOG_DIR}"
+    SNAPSHOT="$(mktemp "${LOG_DIR}/.snapshot.XXXXXX.sh")"
+    cp "$(readlink -f "$0")" "${SNAPSHOT}"
+    chmod +x "${SNAPSHOT}"
     sbatch \
         --job-name="${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
         --output="${LOG_FILE}" \
@@ -27,12 +28,13 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         --cpus-per-task=$((N_GPUS * 4)) \
         --gres=gpu:${N_GPUS} \
         --time="${WALLTIME}" \
-        "${SCRIPT_PATH}"
+        "${SNAPSHOT}"
     exit 0
 fi
 
 
 # Inside SLURM job -> run experiment
+rm -f "$0"
 module purge
 module load anaconda-py3/2024.06
 source $WORK/env_cache_guard.sh

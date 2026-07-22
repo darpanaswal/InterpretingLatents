@@ -339,13 +339,19 @@ def _run_intervened(ctx, sample, intervention_fn):
 def _amplification_worker(
     rank, world_size, task, model_name, n_thoughts,
     data, alphas, baseline_texts,
-    concept_projectors_grad_np, concept_projectors_rand_np,
-    return_queue, family="gpt2", run_grad=True,
+    conditions, return_queue, family="gpt2",
 ):
     """
     Per-GPU worker for the amplification sweep. Loads its own model on
-    cuda:{rank}, runs the unbatched amplification sweep on its shard,
-    sends partial flip counts back via queue.
+    cuda:{rank} ONCE, then runs the unbatched amplification sweep for
+    every condition (gradient + all K random seeds) against that single
+    loaded model, sending partial flip counts back via queue.
+
+    `conditions` is a list of (label, projectors_np) pairs. Looping over
+    all conditions inside one process (instead of spawning a fresh set
+    of processes per condition) avoids reloading the model — and for
+    llama-family checkpoints, repeated disk I/O + CUDA init dominated
+    total amplification runtime far more than the actual forward passes.
     """
     device = f"cuda:{rank}"
     torch.cuda.set_device(rank)
@@ -372,29 +378,30 @@ def _amplification_worker(
         }
 
     indices = _shard_indices(len(data), world_size, rank)
-    print(f"[rank {rank}] processing {len(indices)} instances on {device}", flush=True)
+    print(f"[rank {rank}] processing {len(indices)} instances on {device} "
+          f"across {len(conditions)} condition(s)", flush=True)
 
-    grad_part = None
-    if run_grad:
-        grad_part = run_amplification_sweep(
-            ctx, data, concept_projectors_grad_np, alphas,
-            baseline_texts, label_name=f"GRAD r{rank}",
+    results = {}
+    for label, projectors in conditions:
+        results[label] = run_amplification_sweep(
+            ctx, data, projectors, alphas,
+            baseline_texts, label_name=f"{label} r{rank}",
             instance_indices=indices,
         )
-    rand_part = run_amplification_sweep(
-        ctx, data, concept_projectors_rand_np, alphas,
-        baseline_texts, label_name=f"Rand r{rank}",
-        instance_indices=indices,
-    )
-    return_queue.put({"rank": rank, "grad": grad_part, "rand": rand_part})
+    return_queue.put({"rank": rank, "results": results})
 
 
 def run_amplification_multigpu(
     task, model_name, n_thoughts, data, alphas, baseline_texts,
-    concept_projectors_grad, concept_projectors_rand, n_gpus,
-    family="gpt2", run_grad=True,
+    conditions, n_gpus, family="gpt2",
 ):
-    """Spawn n_gpus workers for the amplification sweep."""
+    """
+    Spawn n_gpus workers ONCE for the amplification sweep. Each worker
+    loads the model a single time and runs every condition in
+    `conditions` (a list of (label, projectors_np) pairs) against it.
+
+    Returns: dict {label: merged_result} for every condition.
+    """
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     procs = []
@@ -403,8 +410,7 @@ def run_amplification_multigpu(
             target=_amplification_worker,
             args=(rank, n_gpus, task, model_name, n_thoughts,
                   data, alphas, baseline_texts,
-                  concept_projectors_grad, concept_projectors_rand, q,
-                  family, run_grad),
+                  conditions, q, family),
         )
         p.start()
         procs.append(p)
@@ -428,13 +434,11 @@ def run_amplification_multigpu(
         p.join()
 
     shards.sort(key=lambda s: s["rank"])
-    grad_merged = (
-        _merge_shards([s["grad"] for s in shards], alphas, len(data))
-        if run_grad else None
-    )
-    rand_merged = _merge_shards(
-        [s["rand"] for s in shards], alphas, len(data))
-    return grad_merged, rand_merged
+    merged = {}
+    for label, _ in conditions:
+        merged[label] = _merge_shards(
+            [s["results"][label] for s in shards], alphas, len(data))
+    return merged
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -897,11 +901,20 @@ def main():
     print("SUBSPACE AMPLIFICATION")
     print("=" * 60)
 
-    # ── Gradient amplification (deterministic, single run) ────────
-    # Multi-GPU path only runs gradient once; rand loops below.
+    # ── Build every condition (gradient + K random seeds) up front ──
+    # so multi-GPU workers can be spawned exactly once and reuse a
+    # single loaded model for all of them, instead of reloading the
+    # model (and respawning processes) once per random seed.
+    rand_subspaces = {}
+    for k in range(K):
+        s_k = args.seed + k
+        _, subspace_rand_k = build_random_subspace_projectors(ranks, D, seed=s_k)
+        rand_subspaces[s_k] = subspace_rand_k
+
     if args.n_gpus > 1:
         print(f"  Multi-GPU: sharding {len(data)} instances across "
-              f"{args.n_gpus} GPUs")
+              f"{args.n_gpus} GPUs, {1 + K} condition(s) per worker "
+              f"(model loaded once per GPU)")
         # Free single-GPU model before spawning workers.
         if is_codi:
             del codi_dict
@@ -911,26 +924,31 @@ def main():
             ctx["coconut_model"] = ctx["base_model"] = ctx["tokenizer"] = None
         torch.cuda.empty_cache()
 
-        # For multi-GPU, we need a single subspace_rand for each seed.
-        # Run gradient once, then loop K rand seeds.
-        # First: gradient only (pass dummy rand to get grad results).
-        dummy_null_rand, dummy_sub_rand = build_random_subspace_projectors(
-            ranks, D, seed=args.seed,
-        )
-        grad_amplification, _ = run_amplification_multigpu(
+        conditions = [("grad", subspace_grad)]
+        conditions += [(f"rand_s{s_k}", rand_subspaces[s_k]) for s_k in rand_subspaces]
+
+        all_results = run_amplification_multigpu(
             args.task, args.model, args.n_thoughts, data, alphas,
-            baseline_texts, subspace_grad, dummy_sub_rand, args.n_gpus,
+            baseline_texts, conditions, args.n_gpus,
             family=args.model_family,
         )
-        del dummy_null_rand, dummy_sub_rand
+        grad_amplification = all_results["grad"]
+        rand_amp_by_seed = {s_k: all_results[f"rand_s{s_k}"] for s_k in rand_subspaces}
     else:
         print("\n  Amplifying along gradient subspace:")
         grad_amplification = run_amplification_sweep(
             ctx, data, subspace_grad, alphas,
             baseline_texts, label_name="GRAD",
         )
+        rand_amp_by_seed = {}
+        for s_k, subspace_rand_k in rand_subspaces.items():
+            print(f"\n  Rand amplification (seed {s_k}):")
+            rand_amp_by_seed[s_k] = run_amplification_sweep(
+                ctx, data, subspace_rand_k, alphas,
+                baseline_texts, label_name=f"Rand s{s_k}",
+            )
 
-    # ── Random amplification: K independent seeds ─────────────────
+    # ── Random amplification: aggregate K independent seeds ────────
     #
     # For each alpha, accumulate K per-instance flip vectors.
     # rand_flip_pooled[alpha] = concat of K flip vectors (length K*N)
@@ -939,29 +957,7 @@ def main():
     rand_flip_pooled = {alpha: [] for alpha in alphas}
     rand_flip_per_seed_rates = {alpha: [] for alpha in alphas}
 
-    for k in range(K):
-        s_k = args.seed + k
-        print(f"\n  Rand amplification (seed {s_k}, {k+1}/{K}):")
-
-        _, subspace_rand_k = build_random_subspace_projectors(
-            ranks, D, seed=s_k,
-        )
-
-        if args.n_gpus > 1:
-            # Re-run multi-GPU for this rand seed only.
-            # Pass subspace_grad as dummy for grad slot (we discard it).
-            _, rand_amp_k = run_amplification_multigpu(
-                args.task, args.model, args.n_thoughts, data, alphas,
-                baseline_texts, subspace_grad, subspace_rand_k, args.n_gpus,
-                family=args.model_family, run_grad=False,
-            )
-        else:
-            rand_amp_k = run_amplification_sweep(
-                ctx, data, subspace_rand_k, alphas,
-                baseline_texts, label_name=f"Rand s{s_k}",
-            )
-
-        # Extract per-instance flip vectors, accumulate, then discard
+    for s_k, rand_amp_k in rand_amp_by_seed.items():
         for alpha in alphas:
             flip_k = np.zeros(N, dtype=np.float64)
             for i in rand_amp_k[alpha]["flipped_indices"]:
@@ -970,19 +966,6 @@ def main():
             rand_flip_per_seed_rates[alpha].append(
                 rand_amp_k[alpha]["flip_rate"]
             )
-
-            # # Per-seed CI record
-            # seed_ci = bootstrap_mean(
-            #     flip_k,
-            #     metric=f"flip_rate_rand_a{alpha}",
-            #     n_boot=args.n_boot,
-            # )
-            # save_record(cis_jsonl, seed_ci,
-            #             context={**ci_ctx, "condition": "rand_amp",
-            #                      "alpha": alpha, "seed": s_k,
-            #                      "seed_index": k, "n_random_seeds": K})
-
-        del subspace_rand_k, rand_amp_k
 
     # ── Summary with bootstrap CIs ──────────────────────────────────
     #

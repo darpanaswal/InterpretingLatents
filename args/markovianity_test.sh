@@ -8,19 +8,21 @@ EXPERIMENT="markovianity_test"
 TASK="gsm"
 MODEL_FAMILY="llama"
 MODEL="codi"
-PROJECT_TO_SUBSPACE="both"
+PROJECT_TO_SUBSPACE="all"
 N_GPUS=1
+CPUS_PER_TASK=4
 WALLTIME="10:00:00"
 ########################################
 
 LOG_DIR="runs/${EXPERIMENT}"
 LOG_FILE="${LOG_DIR}/${TASK}_${MODEL_FAMILY}_${MODEL}.txt"
 
-SCRIPT_PATH="$(readlink -f "$0")"
-
 # If not inside a SLURM job -> submit self
 if [ -z "${SLURM_JOB_ID:-}" ]; then
     mkdir -p "${LOG_DIR}"
+    SNAPSHOT="$(mktemp "${LOG_DIR}/.snapshot.XXXXXX.sh")"
+    cp "$(readlink -f "$0")" "${SNAPSHOT}"
+    chmod +x "${SNAPSHOT}"
     sbatch \
         --job-name="${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
         --output="${LOG_FILE}" \
@@ -28,15 +30,16 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         --partition=gpu_p13 \
         --nodes=1 \
         --ntasks=1 \
-        --cpus-per-task=$((N_GPUS * 4)) \
+        --cpus-per-task=${CPUS_PER_TASK} \
         --gres=gpu:${N_GPUS} \
         --time="${WALLTIME}" \
-        "${SCRIPT_PATH}"
+        "${SNAPSHOT}"
     exit 0
 fi
 
 
 # Inside SLURM job -> run experiment
+rm -f "$0"
 module purge
 module load anaconda-py3/2024.06
 source $WORK/env_cache_guard.sh
@@ -54,7 +57,6 @@ python -u -m experiments.geometry.markovianity_test \
     --task "${TASK}" \
     --model "${MODEL}" \
     --model_family "${MODEL_FAMILY}" \
-    --num_gpus "${N_GPUS}" \
     --project_to_subspace "${PROJECT_TO_SUBSPACE}" \
     >> "${LOG_FILE}" 2>&1
 

@@ -19,17 +19,21 @@ LOG_FILE="${LOG_DIR}/${TASK}_${MODEL_FAMILY}_${MODEL}.txt"
 # If not inside OAR job → submit self
 if [ -z "${OAR_JOB_ID:-}" ]; then
     mkdir -p "${LOG_DIR}"
+    SNAPSHOT="$(mktemp "${LOG_DIR}/.snapshot.XXXXXX.sh")"
+    cp "$0" "${SNAPSHOT}"
+    chmod +x "${SNAPSHOT}"
     oarsub \
         -n "${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
         -p "network_address='lig-gpu1.imag.fr' OR network_address='lig-gpu2.imag.fr' OR network_address='lig-gpu3.imag.fr' OR network_address='lig-gpu4.imag.fr' OR network_address='lig-gpu5.imag.fr' OR network_address='lig-gpu6.imag.fr'" \
         -l /host=1/gpu=${N_GPUS},walltime=${WALLTIME} \
         -O "${LOG_FILE}" \
         -E "${LOG_FILE}" \
-        "$0"
+        "${SNAPSHOT}"
     exit 0
 fi
 
 # Inside OAR job → run experiment
+rm -f "$0"
 source primitive/bin/activate
 
 > "${LOG_FILE}"
@@ -46,4 +50,4 @@ python -u -m experiments.dead_salmon.logit_lens \
     --k "${K}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash args/logit_lens.sh
+# TO RUN, COPY: bash args_old/logit_lens.sh

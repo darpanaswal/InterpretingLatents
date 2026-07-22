@@ -4,18 +4,19 @@ set -euo pipefail
 ########################################
 # CONFIGURE HERE
 ########################################
-EXPERIMENT="random_corruption"
+EXPERIMENT="gradient_subspace_interventions_predtoken"
 TASK="gsm"
 MODEL_FAMILY="llama"
 MODEL="codi"
-CODI_BATCH_SIZE=8
-NUM_SEEDS=3
 N_GPUS=4
-WALLTIME="10:00:00"
+WALLTIME="6:00:00"
 ########################################
 
 LOG_DIR="runs/${EXPERIMENT}"
 LOG_FILE="${LOG_DIR}/${TASK}_${MODEL_FAMILY}_${MODEL}.txt"
+
+BASES_PATH="outputs/gradient_geometry_predtoken/${MODEL_FAMILY}/${TASK}/${MODEL}/bases.npz"
+OUTPUT_DIR="outputs/grad_subspace_predtoken/${MODEL_FAMILY}/${TASK}/${MODEL}"
 
 # If not inside OAR job → submit self
 if [ -z "${OAR_JOB_ID:-}" ]; then
@@ -39,20 +40,25 @@ source primitive/bin/activate
 
 > "${LOG_FILE}"
 echo "Task            : ${TASK}"
-echo "Model           : ${MODEL}"
 echo "Model Family    : ${MODEL_FAMILY}"
+echo "Model           : ${MODEL}"
 echo "GPUs            : ${N_GPUS}"
-echo "CODI Batch Size : ${CODI_BATCH_SIZE}"
-echo "Num Seeds       : ${NUM_SEEDS}"
+echo "Bases path      : ${BASES_PATH}"
+echo "Output dir      : ${OUTPUT_DIR}"
 echo "Log file        : ${LOG_FILE}"
 
-python -u -m experiments.random_corruption \
+if [ ! -f "${BASES_PATH}" ]; then
+    echo "ERROR: ${BASES_PATH} not found. Run args_old/gradient_subspace_predtoken.sh first." >&2
+    exit 1
+fi
+
+python -u -m experiments.ablation.gradient_subspace_interventions \
     --task "${TASK}" \
     --model_family "${MODEL_FAMILY}" \
     --model "${MODEL}" \
     --n_gpus "${N_GPUS}" \
-    --codi_batch_size "${CODI_BATCH_SIZE}" \
-    --n_seeds "${NUM_SEEDS}" \
+    --bases_path "${BASES_PATH}" \
+    --output_dir "${OUTPUT_DIR}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash args/random_corruption.sh
+# TO RUN, COPY: bash args_old/gradient_subspace_interventions_predtoken.sh

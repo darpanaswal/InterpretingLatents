@@ -1,11 +1,18 @@
 """
 Standalone plotting for markovianity_test.py results.
 
-Reads ``out_dir/results_{model}_{task}[_subspace].json`` and CI logs.
-Produces:
-    out_dir/figures/markov_heatmaps.png   -- 2x2 grid of R^2 heatmaps
-    out_dir/tab_markovianity_stats.tex    -- Appendix summary table
-
+Reads ``out_dir/results_{model}_{task}[_subspace|_subspace_pred].json`` and
+CI logs. Produces, per family:
+    Plots/markov/markov_heatmaps_<family>.pdf       -- full thoughts + GOLD
+                                                        subspace (unchanged)
+    Plots/markov/markov_heatmaps_<family>_pred.pdf  -- full thoughts + PRED
+                                                        (predicted-token)
+                                                        subspace
+    Tables/statistical/markovianity_<family>.tex    -- appendix table, GOLD
+                                                        subspace only (the
+                                                        pred subspace does
+                                                        NOT get its own
+                                                        table)
 """
 
 import csv
@@ -346,46 +353,39 @@ def main():
                          "found under outputs/markovianity/.")
     ap.add_argument("--tables_dir", default="Tables/statistical",
                     help="Directory for markovianity_<family>.tex files.")
-    ap.add_argument(
-        "--subspace", choices=["gold", "pred"], default="gold",
-        help="Which subspace populates the projected 'Subspace' row: "
-             "'gold' (gradient of gold-answer NLL; default) or 'pred' "
-             "(gradient of the model's own predicted-token NLL). Selects the "
-             "matching results_*[_subspace|_subspace_pred].json files. "
-             "Outputs are namespaced by source so gold and pred coexist.",
-    )
     args = ap.parse_args()
 
     families = ([args.model_family] if args.model_family else discover_families())
     if not families:
         print(f"[WARN] No families found under {OUT_DIR}")
         return
-    print(f"[INFO] Families: {families}  subspace={args.subspace}")
+    print(f"[INFO] Families: {families}")
 
     tables_dir = Path(args.tables_dir)
     tables_dir.mkdir(parents=True, exist_ok=True)
-
-    # Filename tag so gold and pred figures/tables don't overwrite.
-    src_tag = "" if args.subspace == "gold" else "_pred"
+    plot_dir = Path("Plots/markov")
+    plot_dir.mkdir(parents=True, exist_ok=True)
 
     for family in families:
-        # 1. Point to the actual data directory for this family
         data_dir = OUT_DIR / family
-        data = discover_results(data_dir, subspace_source=args.subspace)
 
-        # 2. Ensure your output directory for the plots exists
-        plot_dir = Path("Plots/markov")
-        plot_dir.mkdir(parents=True, exist_ok=True)
+        # Two heatmaps per family: full+gold (unchanged) and full+pred (new).
+        # Each subspace source gets its own `data` pull since discover_results
+        # only fills the projected slot for the requested source.
+        for subspace_source in ("gold", "pred"):
+            data = discover_results(data_dir, subspace_source=subspace_source)
+            src_tag = "" if subspace_source == "gold" else "_pred"
+            plot_heatmaps(
+                data, plot_dir / f"markov_heatmaps_{family}{src_tag}.pdf",
+                subspace_source=subspace_source,
+            )
 
-        # 3. Save the plots and tables
-        plot_heatmaps(
-            data, plot_dir / f"markov_heatmaps_{family}{src_tag}.pdf",
-            subspace_source=args.subspace,
-        )
-
-        out_path = tables_dir / f"markovianity_{family}{src_tag}.tex"
-        build_appendix_table(data, family, out_path,
-                             subspace_source=args.subspace)
+        # Appendix table: gold subspace only, unchanged from before (no
+        # pred-subspace table is produced).
+        data_gold = discover_results(data_dir, subspace_source="gold")
+        out_path = tables_dir / f"markovianity_{family}.tex"
+        build_appendix_table(data_gold, family, out_path,
+                             subspace_source="gold")
 
 
 if __name__ == "__main__":

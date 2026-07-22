@@ -28,9 +28,8 @@ Baselines that the model must beat to mean anything:
         => if thoughts barely move step-to-step, identity already
            gives high R^2 and a "good" linear fit is meaningless.
 
-If train-split thoughts do not exist on disk, we extract them now using
-the same machinery as extract_thoughts.py, pointed at the TRAIN data
-file. The script never silently splits the test file.
+Both TRAIN- and TEST-split thoughts must already exist on disk (see
+extract_thoughts.py); this script never extracts them.
 
 Subspace-projection mode (--project_to_subspace)
 ------------------------------------------------
@@ -65,216 +64,17 @@ import numpy as np
 import torch.nn as nn
 from pathlib import Path
 from sklearn.metrics import r2_score
-from src.config import (
-    THOUGHTS, BASE_DIR, set_seed,
-    PROSQA_TRAIN, GSM_TRAIN,
-)
+from src.config import THOUGHTS, BASE_DIR, set_seed
 from src.bootstrap_stats import (
     bootstrap_r2, bootstrap_mean, save_record, BootstrapResult,
 )
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Train-split thought extraction (only run if file is missing)
-# ═══════════════════════════════════════════════════════════════════
-
-def _train_data_path(task):
-    return PROSQA_TRAIN if task == "prosqa" else GSM_TRAIN
-
-
-def _select_train_indices(task, max_instances, seed=0):
-    train_path = _train_data_path(task)
-    with open(train_path, "r") as f:
-        n_total = len(json.load(f))
-    if max_instances is None or max_instances >= n_total:
-        return list(range(n_total))
-    g = torch.Generator().manual_seed(seed)
-    perm = torch.randperm(n_total, generator=g)[:max_instances]
-    return sorted(perm.tolist())
-
-
-def _extract_indices(task, model, n_thoughts, device, indices,
-                     batch_size=32, log_prefix="[extract]", family="gpt2"):
-    from experiments.extract_thoughts import (
-        extract_thoughts_single_instance,
-        extract_thoughts_codi_batch,
-    )
-    from src.utils import setup_model_and_tokenizer, setup_codi_model
-
-    train_path = _train_data_path(task)
-    with open(train_path, "r") as f:
-        full_data = json.load(f)
-    data = [full_data[i] for i in indices]
-    N = len(data)
-    K = n_thoughts
-
-    is_codi = (model == "codi")
-    if is_codi:
-        codi_dict = setup_codi_model(task, device, family=family)
-        D = codi_dict["hidden_size"]
-        thoughts = extract_thoughts_codi_batch(
-            codi_dict, data, K, device, batch_size=batch_size,
-        )
-    else:
-        coconut_model, base_model, tokenizer, latent_id, start_id, end_id, _ \
-            = setup_model_and_tokenizer(task, model, device, family=family)
-        # GPT-2 exposes `n_embd`; Llama exposes `hidden_size`.
-        D = getattr(base_model.config, "n_embd",
-                    getattr(base_model.config, "hidden_size", None))
-        thoughts = torch.zeros(N, K + 1, D)
-        for j, sample in enumerate(data):
-            if j % 100 == 0:
-                print(f"  {log_prefix} {j}/{N}", flush=True)
-            thoughts[j] = extract_thoughts_single_instance(
-                coconut_model, base_model, tokenizer, sample, K, device,
-                start_id, latent_id, end_id,
-            )
-    return thoughts
-
-
-def extract_train_thoughts(task, model, n_thoughts, device,
-                           batch_size=32, max_instances=None,
-                           num_gpus=1, seed=0, family="gpt2"):
-    indices = _select_train_indices(task, max_instances, seed=seed)
-    N = len(indices)
-    print(f"[extract] {model}/{task} ({family}) TRAIN: {N} instances "
-          f"(max_instances={max_instances}, seed={seed}, num_gpus={num_gpus})")
-
-    # Layout matches extract_thoughts.py: THOUGHTS/<family>/<task>/...
-    out_path = THOUGHTS / family / task / f"thoughts_{model}_train.pt"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if num_gpus <= 1:
-        thoughts = _extract_indices(task, model, n_thoughts, device,
-                                    indices, batch_size=batch_size,
-                                    family=family)
-    else:
-        thoughts = _extract_with_workers(
-            task, model, n_thoughts, indices,
-            batch_size=batch_size, num_gpus=num_gpus, seed=seed,
-            family=family,
-        )
-
-    torch.save({
-        "thoughts": thoughts,
-        "instance_indices": indices,
-        "n_thoughts": n_thoughts,
-        "model": model,
-        "model_family": family,
-        "data_path": str(_train_data_path(task)),
-        "split": "train",
-        "subsample_seed": seed,
-        "max_instances": max_instances,
-    }, out_path)
-    print(f"[extract] saved {tuple(thoughts.shape)} -> {out_path}")
-    return thoughts
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Multi-GPU orchestration
-# ═══════════════════════════════════════════════════════════════════
-
-def _shard_path(task, model, shard_id, family="gpt2"):
-    return THOUGHTS / family / task / f"_thoughts_{model}_train_shard{shard_id}.pt"
-
-
-def _extract_with_workers(task, model, n_thoughts, indices,
-                          batch_size, num_gpus, seed, family="gpt2"):
-    import os
-    import subprocess
-    import sys
-    import tempfile
-
-    module_name = None
-    spec = globals().get("__spec__", None)
-    if spec is not None and spec.name and spec.name != "__main__":
-        module_name = spec.name
-
-    project_root = str(Path(__file__).resolve().parents[1])
-    chunks = np.array_split(np.array(indices), num_gpus)
-    tmp_dir = Path(tempfile.mkdtemp(prefix="markov_shards_"))
-    procs = []
-    for gpu_id, chunk in enumerate(chunks):
-        idx_file = tmp_dir / f"indices_gpu{gpu_id}.json"
-        with open(idx_file, "w") as f:
-            json.dump([int(i) for i in chunk], f)
-
-        env = dict(**os.environ)
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = (project_root + os.pathsep + existing
-                             if existing else project_root)
-
-        if module_name is not None:
-            launcher = [sys.executable, "-m", module_name]
-        else:
-            launcher = [sys.executable, str(Path(__file__).resolve())]
-
-        # NOTE: family must be passed to BOTH --model_family (consumed by the
-        # worker's _build_ctx path) and --_worker_family (used inside
-        # _run_worker_mode), else the worker silently loads gpt2.
-        cmd = launcher + [
-            "--_worker_mode",
-            "--_worker_task", task,
-            "--_worker_model", model,
-            "--_worker_n_thoughts", str(n_thoughts),
-            "--_worker_indices_file", str(idx_file),
-            "--_worker_shard_id", str(gpu_id),
-            "--_worker_batch_size", str(batch_size),
-            "--_worker_family", family,
-            "--task", task, "--model", model, "--model_family", family,
-        ]
-        print(f"[orchestrator] launching worker {gpu_id} on GPU {gpu_id} "
-              f"({family}) with {len(chunk)} instances", flush=True)
-        procs.append(subprocess.Popen(cmd, env=env))
-
-    failed = []
-    for gpu_id, p in enumerate(procs):
-        rc = p.wait()
-        if rc != 0:
-            failed.append((gpu_id, rc))
-    if failed:
-        raise RuntimeError(f"Worker(s) failed: {failed}")
-
-    parts = []
-    for gpu_id in range(num_gpus):
-        path = _shard_path(task, model, gpu_id, family=family)
-        parts.append(torch.load(path, map_location="cpu",
-                                weights_only=False)["thoughts"])
-        path.unlink()
-    for gpu_id in range(num_gpus):
-        (tmp_dir / f"indices_gpu{gpu_id}.json").unlink(missing_ok=True)
-    tmp_dir.rmdir()
-    return torch.cat(parts, dim=0)
-
-
-def _run_worker_mode(args):
-    with open(args._worker_indices_file, "r") as f:
-        indices = json.load(f)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    family = args._worker_family
-    print(f"[worker {args._worker_shard_id}] device={device} "
-          f"family={family} n_indices={len(indices)}", flush=True)
-    thoughts = _extract_indices(
-        args._worker_task, args._worker_model, args._worker_n_thoughts,
-        device, indices, batch_size=args._worker_batch_size,
-        log_prefix=f"[worker {args._worker_shard_id}]", family=family,
-    )
-    out = _shard_path(args._worker_task, args._worker_model,
-                      args._worker_shard_id, family=family)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"thoughts": thoughts, "indices": indices}, out)
-    print(f"[worker {args._worker_shard_id}] saved {tuple(thoughts.shape)} "
-          f"-> {out}", flush=True)
-
-
-# ═══════════════════════════════════════════════════════════════════
 # Data loading
 # ═══════════════════════════════════════════════════════════════════
 
-def load_thoughts(task, model, n_thoughts, device,
-                  batch_size=32, max_train_instances=None,
-                  num_gpus=1, seed=0, family="gpt2"):
+def load_thoughts(task, model, family="gpt2"):
     # Layout matches extract_thoughts.py: THOUGHTS/<family>/<task>/...
     base = THOUGHTS / family / task
     train_path = base / f"thoughts_{model}_train.pt"
@@ -287,11 +87,11 @@ def load_thoughts(task, model, n_thoughts, device,
             f"--model_family {family}."
         )
     if not train_path.exists():
-        print(f"[INFO] Train thoughts missing at {train_path}; extracting...")
-        extract_train_thoughts(task, model, n_thoughts, device,
-                               batch_size=batch_size,
-                               max_instances=max_train_instances,
-                               num_gpus=num_gpus, seed=seed, family=family)
+        raise FileNotFoundError(
+            f"Train thoughts not found at {train_path}. "
+            f"Run extract_thoughts.py --split train for --task {task} "
+            f"--model {model} --model_family {family}."
+        )
 
     train = torch.load(train_path, map_location="cpu",
                        weights_only=False)["thoughts"]
@@ -628,11 +428,8 @@ def identity_prediction(thoughts_eval, order, drop_h0=True, skip_ts=None):
 # Run a single (task, model)
 # ═══════════════════════════════════════════════════════════════════
 
-# [ONLY showing the modified run() section — everything else remains EXACTLY your v3]
-
 def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
-        n_thoughts=6, batch_size=32, max_train_instances=None,
-        num_gpus=1, seed=0, project_to_subspace=False, bases_path=None,
+        project_to_subspace=False, bases_path=None,
         out_dir=None, mlp_seeds=None, n_boot=1000, family="gpt2",
         subspace_source="gold"):
 
@@ -645,10 +442,7 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
           + proj_tag
           + f"\n{'='*64}")
 
-    train, test = load_thoughts(task, model, n_thoughts=n_thoughts,
-                                device=device, batch_size=batch_size,
-                                max_train_instances=max_train_instances,
-                                num_gpus=num_gpus, seed=seed, family=family)
+    train, test = load_thoughts(task, model, family=family)
 
     Kp1 = train.shape[1]
     skip_ts = []
@@ -911,8 +705,7 @@ def main():
                         required=True)
     parser.add_argument(
         "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
-        help="Base model family. Threads through train-thought extraction "
-             "(model loading) and namespaces all thought/bases/output paths.",
+        help="Base model family. Namespaces all thought/bases/output paths.",
     )
     parser.add_argument("--orders", type=int, nargs="+",
                         default=[1, 2, 3, 4, 5])
@@ -925,23 +718,12 @@ def main():
     parser.add_argument(
         "--device", type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device for thought extraction, ridge solves, and MLP fitting.",
+        help="Device for ridge solves and MLP fitting.",
     )
     parser.add_argument("--include_h0", action="store_true",
                         help="Include h_0 (pre-recurrence) in inputs.")
-    parser.add_argument("--n_thoughts", type=int, default=6,
-                        help="K, used only when extracting train thoughts.")
-    parser.add_argument("--batch_size", type=int, default=32,
-                        help="Used only for CODI extraction.")
-    parser.add_argument("--max_train_instances", type=int, default=100_000,
-                        help="Cap on TRAIN instances to extract. None=all. "
-                             "Subsampled with --seed; sufficient for "
-                             "fitting up to ~4k-dim ridge regressions.")
-    parser.add_argument("--num_gpus", type=int, default=1,
-                        help="If >1, shard TRAIN extraction across N GPUs "
-                             "via subprocess workers.")
     parser.add_argument("--seed", type=int, default=0,
-                        help="Subsample + shuffle seed.")
+                        help="Global reproducibility seed.")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument(
         "--project_to_subspace", type=str,
@@ -971,28 +753,7 @@ def main():
     )
     parser.add_argument("--n_boot", type=int, default=1000,
                     help="Number of bootstrap iterations.")
-
-    parser.add_argument("--_worker_mode", action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--_worker_task", type=str, default=None,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--_worker_model", type=str, default=None,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--_worker_n_thoughts", type=int, default=6,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--_worker_indices_file", type=str, default=None,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--_worker_shard_id", type=int, default=0,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--_worker_batch_size", type=int, default=32,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--_worker_family", type=str, default="gpt2",
-                        help=argparse.SUPPRESS)
     args = parser.parse_args()
-
-    if args._worker_mode:
-        _run_worker_mode(args)
-        return
 
     set_seed(args.seed)
 
@@ -1038,9 +799,6 @@ def main():
                     orders=sorted(args.orders),
                     ridge=args.ridge, mlp_hidden=args.mlp_hidden,
                     device=args.device, drop_h0=(not args.include_h0),
-                    n_thoughts=args.n_thoughts, batch_size=args.batch_size,
-                    max_train_instances=args.max_train_instances,
-                    num_gpus=args.num_gpus, seed=args.seed,
                     project_to_subspace=proj_mode,
                     bases_path=(effective_bases_path if proj_mode else None),
                     out_dir=out_dir,

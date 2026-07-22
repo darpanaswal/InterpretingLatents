@@ -622,10 +622,14 @@ def setup_model_and_tokenizer(task, mode, device, family="gpt2"):
             embeddings.weight.data[token_id] = embeddings.weight.data[target_id].clone()
             lm_head.weight.data[token_id] = lm_head.weight.data[target_id].clone()
 
-    # Full-FT already carries resized embeddings + trained latent vectors: resizing or
-    # overwriting with the "<<" copy would clobber trained weights. Skip both.
+    # Full-FT pause/coconut/coconut_u checkpoints already carry resized embeddings +
+    # trained latent vectors: resizing or overwriting with the "<<" copy would clobber
+    # trained weights, so skip both. Full-FT cot checkpoints are the exception — cot
+    # training never introduces latent tokens, so even a full-FT cot checkpoint still
+    # needs the embedding table resized and the "<<" fallback copied into the new slots.
     resize_after_lora = (family == "llama" and mode == "cot" and not llama_full_ft)
-    if not resize_after_lora and not llama_full_ft:
+    needs_resize_now = not llama_full_ft or (mode == "cot" and llama_full_ft)
+    if not resize_after_lora and needs_resize_now:
         _resize_and_copy_target(model)
 
     # --- Llama LoRA Loading (skipped for full-FT) ---
