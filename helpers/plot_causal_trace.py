@@ -497,9 +497,6 @@ def discover_families(base_dir: Path) -> list:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["restorative", "disruptive"], default="restorative")
-    ap.add_argument("--model_family", choices=["gpt2", "llama"], default=None,
-                    help="Restrict to one family. Default: loop all families "
-                         "found under the trace output base.")
     ap.add_argument("--in_dir", type=str, default=None)
     ap.add_argument("--corruption", default="symbol_swap")
     ap.add_argument("--granularity", choices=["single", "window"], default="single")
@@ -518,8 +515,7 @@ def main():
     out_tex_dir.mkdir(parents=True, exist_ok=True)
     prefix = "causal_trace" if args.mode == "restorative" else "rev_causal_trace"
 
-    families = ([args.model_family] if args.model_family
-                else discover_families(base_in))
+    families = discover_families(base_in)
     if not families:
         print(f"[WARN] No families found under {base_in}")
         return

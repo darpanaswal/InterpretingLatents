@@ -2,7 +2,10 @@
 gradient_subspace_tables.py
 ============================
 
-Reads artefacts produced by gradient_subspace_interventions.py and emits:
+Reads artefacts produced by gradient_subspace_interventions.py (gold,
+gradient of gold-answer NLL) and gradient_subspace_predtoken_interventions.py
+(pred, gradient of the model's own predicted-token NLL) and emits, for each
+source independently:
 
   Main-text figure
   ----------------
@@ -27,10 +30,21 @@ Reads artefacts produced by gradient_subspace_interventions.py and emits:
        - Per-(task, model, alpha) bootstrap flip-rate CIs + paired
          diffs + McNemar for the amplification phase.
 
-Source artefacts (per task/model under outputs/grad_subspace/):
-  - ablation_results.json         (summary point estimates + CIs + McNemar p)
-  - amplification_results.json    (alphas, grad/rand flip rates, amp_cis)
-  - bootstrap_cis.jsonl           (full CI records with _context tags)
+Source artefacts (per family/task/model, root differs by source):
+  gold: outputs/grad_subspace/<family>/<task>/<model>/
+  pred: outputs/grad_subspace_predtoken/<family>/<task>/<model>/
+    - ablation_results.json         (summary point estimates + CIs + McNemar p)
+    - amplification_results.json    (alphas, grad/rand flip rates, amp_cis)
+    - bootstrap_cis.jsonl           (full CI records with _context tags)
+
+Writes, for every model family found on disk for each source:
+    Plots/gradient_subspace_interventions/amplification_{family}.pdf            (gold)
+    Plots/gradient_subspace_predtoken_interventions/amplification_predtoken_{family}.pdf (pred)
+    Tables/statistical/gradient_subspace_interventions_{family}.tex             (gold)
+    Tables/statistical/gradient_subspace_predtoken_interventions_{family}.tex   (pred)
+
+A source is skipped entirely if its root directory has no families on disk
+(e.g. gradient_subspace_predtoken_interventions.py was never run).
 
 Usage
 -----
@@ -39,8 +53,8 @@ Usage
     # Dry-run: print every path probed and what was loaded.
     python -m helpers.plot_gradient_subspace_interventions --debug
 
-    # Override output figure and tables directories:
-    python -m helpers.plot_gradient_subspace_interventions --out_fig results/figures/fig.pdf --out_tables_dir results/tables
+    # Override the tables output directory:
+    python -m helpers.plot_gradient_subspace_interventions --out_tables_dir results/tables
 """
 
 import json
@@ -57,7 +71,26 @@ from src.config import OUTPUTS
 
 # ── Canonical layout ────────────────────────────────────────────────────────
 
-GRAD_SUBSPACE = OUTPUTS / "grad_subspace"
+# Subspace sources to discover + plot: gold keeps the legacy paths, pred
+# sits alongside in its own namespaced tree so nothing gets overwritten.
+SOURCES = [
+    {
+        "name": "gold",
+        "root": OUTPUTS / "grad_subspace",
+        "fig_dir": Path("Plots/gradient_subspace_interventions"),
+        "fig_name": "amplification_{family}.pdf",
+        "table_name": "gradient_subspace_interventions_{family}.tex",
+        "relabel": False,
+    },
+    {
+        "name": "pred",
+        "root": OUTPUTS / "grad_subspace_predtoken",
+        "fig_dir": Path("Plots/gradient_subspace_predtoken_interventions"),
+        "fig_name": "amplification_predtoken_{family}.pdf",
+        "table_name": "gradient_subspace_predtoken_interventions_{family}.tex",
+        "relabel": True,
+    },
+]
 
 # (dir name on disk, LaTeX column label, plot label)
 MODELS = [
@@ -194,13 +227,14 @@ def _fmt_endpoint_pct(point_pct, ci_record, decimals=1):
 
 # ── Data collection ─────────────────────────────────────────────────────────
 
-def collect_ablation(family: str = "gpt2", debug: bool = False) -> dict:
+def collect_ablation(root: Path, family: str = "gpt2", debug: bool = False) -> dict:
     """
     For each (task, model) load ablation_results.json and bootstrap_cis.jsonl.
     Returns: data[task][dir_name] = entry dict or None.
 
-    gradient_subspace_interventions.py writes
-    outputs/grad_subspace/<family>/<task>/<model>/.
+    root is either outputs/grad_subspace (gold) or
+    outputs/grad_subspace_predtoken (pred); both are written with the same
+    <family>/<task>/<model>/ layout.
 
     Note: ablation_results.json (written by gradient_subspace_interventions.py)
     contains the point estimates and the CIs as [low, high] lists; the McNemar
@@ -212,7 +246,7 @@ def collect_ablation(family: str = "gpt2", debug: bool = False) -> dict:
         if debug:
             print(f"\n-- ABLATION  {task_label} ({task}) [{family}] --")
         for dir_name, _, _ in MODELS:
-            base = GRAD_SUBSPACE / family / task / dir_name
+            base = root / family / task / dir_name
             if debug:
                 print(f"  model={dir_name}  base={base}")
 
@@ -257,13 +291,14 @@ def collect_ablation(family: str = "gpt2", debug: bool = False) -> dict:
     return data
 
 
-def collect_amplification(family: str = "gpt2", debug: bool = False) -> dict:
+def collect_amplification(root: Path, family: str = "gpt2", debug: bool = False) -> dict:
     """
     For each (task, model) load amplification_results.json and bootstrap_cis.jsonl.
     Returns: amp[task][dir_name] = {"alphas", "raw", "records", "n"} or None.
 
-    gradient_subspace_interventions.py writes
-    outputs/grad_subspace/<family>/<task>/<model>/.
+    root is either outputs/grad_subspace (gold) or
+    outputs/grad_subspace_predtoken (pred); both are written with the same
+    <family>/<task>/<model>/ layout.
 
     amp_results.json layout (written by gradient_subspace_interventions.py):
       - alphas:                  list[float]
@@ -279,7 +314,7 @@ def collect_amplification(family: str = "gpt2", debug: bool = False) -> dict:
         if debug:
             print(f"\n-- AMPLIFICATION  {task_label} ({task}) [{family}] --")
         for dir_name, _, _ in MODELS:
-            base = GRAD_SUBSPACE / family / task / dir_name
+            base = root / family / task / dir_name
             summary = load_json(base / "amplification_results.json", debug)
             records = load_jsonl(base / "bootstrap_cis.jsonl", debug)
             if summary is None:
@@ -826,11 +861,11 @@ def build_amp_stats_table(amp: dict, family: str = "") -> str:
 # Entry point
 # ────────────────────────────────────────────────────────────────────────────
 
-def discover_families() -> list:
-    """Families present on disk under grad_subspace/<family>/."""
+def discover_families(root: Path) -> list:
+    """Families present on disk under root/<family>/."""
     found = set()
-    if GRAD_SUBSPACE.is_dir():
-        for child in GRAD_SUBSPACE.iterdir():
+    if root.is_dir():
+        for child in root.iterdir():
             if child.is_dir() and child.name != "figures":
                 found.add(child.name)
     known = [f for f in ("gpt2", "llama") if f in found]
@@ -838,19 +873,24 @@ def discover_families() -> list:
     return known + extra
 
 
+def _relabel_predtoken(abl_stats: str, amp_stats: str, family: str) -> tuple:
+    """Re-label LaTeX \\label keys and captions so they don't collide with gold."""
+    abl_stats = abl_stats.replace(
+        f"tab:gradsubspace_ablation_stats_{family}",
+        f"tab:gradsubspace_predtoken_ablation_stats_{family}",
+    ).replace("ablation statistical tests (",
+              "ablation statistical tests, predicted-token subspace (")
+    amp_stats = amp_stats.replace(
+        f"tab:gradsubspace_amp_stats_{family}",
+        f"tab:gradsubspace_predtoken_amp_stats_{family}",
+    ).replace("amplification flip-rate statistics (",
+              "amplification flip-rate statistics, predicted-token "
+              "subspace (")
+    return abl_stats, amp_stats
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "--model_family", choices=["gpt2", "llama"], default=None,
-        help="Restrict to one family. Default: loop all families found "
-             "under outputs/grad_subspace/.",
-    )
-    ap.add_argument(
-        "--out_fig_dir", type=Path,
-        default="Plots/gradient_subspace_interventions",
-        help="Directory for per-family line figures "
-             "(default: Plots/gradient_subspace_interventions)",
-    )
     ap.add_argument(
         "--out_tables_dir", type=Path,
         default=Path("Tables/statistical"),
@@ -862,47 +902,59 @@ def main():
     )
     args = ap.parse_args()
 
-    families = ([args.model_family] if args.model_family else discover_families())
-    if not families:
-        print(f"[WARN] No families found under {GRAD_SUBSPACE}")
-        return
-    print(f"[INFO] Families: {families}")
-
     out_tables = args.out_tables_dir
-    out_fig_dir = args.out_fig_dir
     out_tables.mkdir(parents=True, exist_ok=True)
-    out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-    for family in families:
-        abl_data = collect_ablation(family=family, debug=args.debug)
-        amp_data = collect_amplification(family=family, debug=args.debug)
-
-        if args.debug:
-            print(f"\n-- Ablation summary [{family}] --")
-            for task, models in abl_data.items():
-                for m, e in models.items():
-                    ok = "None" if e is None else (
-                        f"orig={e['orig']}, grad={e['grad']}, rand={e['rand']}, n={e['n']}"
-                    )
-                    print(f"  {task}/{m}: {ok}")
-            print(f"\n-- Amplification summary [{family}] --")
-            for task, models in amp_data.items():
-                for m, e in models.items():
-                    ok = "None" if e is None else f"{len(e['alphas'])} alphas, n={e['n']}"
-                    print(f"  {task}/{m}: {ok}")
+    any_found = False
+    for source in SOURCES:
+        root = source["root"]
+        families = discover_families(root)
+        if not families:
+            print(f"[skip] {source['name']}: no families found under {root}")
             continue
+        any_found = True
+        print(f"[INFO] ({source['name']}) Families: {families}")
 
-        # Main-text figure (namespaced by family).
-        out_fig = out_fig_dir / f"amplification_{family}.pdf"
-        build_amplification_lineplot(amp_data, out_fig)
+        fig_dir = source["fig_dir"]
+        fig_dir.mkdir(parents=True, exist_ok=True)
 
-        # Appendix tables — one combined file per family.
-        abl_stats = build_ablation_stats_table(abl_data, family=family)
-        amp_stats = build_amp_stats_table(amp_data, family=family)
-        combined_stats = abl_stats + "\n\n" + amp_stats
-        p = out_tables / f"gradient_subspace_interventions_{family}.tex"
-        p.write_text(combined_stats)
-        print(f"[OK] Appendix tables -> {p.resolve()}")
+        for family in families:
+            abl_data = collect_ablation(root, family=family, debug=args.debug)
+            amp_data = collect_amplification(root, family=family, debug=args.debug)
+
+            if args.debug:
+                print(f"\n-- ({source['name']}) Ablation summary [{family}] --")
+                for task, models in abl_data.items():
+                    for m, e in models.items():
+                        ok = "None" if e is None else (
+                            f"orig={e['orig']}, grad={e['grad']}, rand={e['rand']}, n={e['n']}"
+                        )
+                        print(f"  {task}/{m}: {ok}")
+                print(f"\n-- ({source['name']}) Amplification summary [{family}] --")
+                for task, models in amp_data.items():
+                    for m, e in models.items():
+                        ok = "None" if e is None else f"{len(e['alphas'])} alphas, n={e['n']}"
+                        print(f"  {task}/{m}: {ok}")
+                continue
+
+            # Main-text figure (namespaced by family and source).
+            out_fig = fig_dir / source["fig_name"].format(family=family)
+            build_amplification_lineplot(amp_data, out_fig)
+
+            # Appendix tables — one combined file per (source, family).
+            abl_stats = build_ablation_stats_table(abl_data, family=family)
+            amp_stats = build_amp_stats_table(amp_data, family=family)
+            if source["relabel"]:
+                abl_stats, amp_stats = _relabel_predtoken(abl_stats, amp_stats, family)
+            combined_stats = abl_stats + "\n\n" + amp_stats
+            p = out_tables / source["table_name"].format(family=family)
+            p.write_text(combined_stats)
+            print(f"[OK] ({source['name']}) Appendix tables -> {p.resolve()}")
+
+    if not any_found:
+        raise SystemExit(
+            f"No families found under {SOURCES[0]['root']} or {SOURCES[1]['root']}."
+        )
 
 
 if __name__ == "__main__":

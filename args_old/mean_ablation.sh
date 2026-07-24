@@ -7,7 +7,7 @@ set -euo pipefail
 EXPERIMENT="mean_ablation"
 TASK="gsm"
 MODEL_FAMILY="llama"
-MODEL="codi"
+MODEL="coconut_u"
 N_THOUGHTS=6
 INTERVENTION="all"
 N_GPUS=4
@@ -55,4 +55,4 @@ PYTHONUNBUFFERED=1 python -u -m experiments.geometry.mean_ablation \
     --model_family "${MODEL_FAMILY}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash args/mean_ablation.sh
+# TO RUN, COPY: bash args_old/mean_ablation.sh

@@ -758,7 +758,6 @@ def _load_data(data_dir, file_pattern):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_family", type=str, default="gpt2", help="GPT2 or Llama")
     parser.add_argument("--out_dir", type=str, default="Plots/epiphenomena", help="Output directory for merged PDF")
     parser.add_argument("--tables_dir", type=str, default="Tables/statistical", help="Directory for LaTeX tables")
     args = parser.parse_args()
@@ -766,50 +765,55 @@ def main():
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     Path(args.tables_dir).mkdir(parents=True, exist_ok=True)
 
-    # 1. Load Superposition Data
-    sup_dir = f"outputs/superposition/{args.model_family}"
-    sup_results = _load_data(sup_dir, "results_*.json")
-    sup_cis = {m: _load_jsonl(Path(sup_dir) / "ci" / f"superposition_{m}.jsonl") for m in sup_results}
-    sup_k = [k for k in sorted({int(k) for mode in sup_results for k in sup_results[mode]["summary"]}) if k <= 4]
+    for model_family in ("gpt2", "llama"):
+        # 1. Load Superposition Data
+        sup_dir = f"outputs/superposition/{model_family}"
+        sup_results = _load_data(sup_dir, "results_*.json")
+        sup_cis = {m: _load_jsonl(Path(sup_dir) / "ci" / f"superposition_{m}.jsonl") for m in sup_results}
+        sup_k = [k for k in sorted({int(k) for mode in sup_results for k in sup_results[mode]["summary"]}) if k <= 4]
 
-    # 2. Load Logit-Lens Data
-    ll_k = 6
-    ll_dir = f"outputs/logit_lens/{args.model_family}"
-    ll_results = _load_data(ll_dir, f"gsm_*_k{ll_k}.json")
-    ll_cis = {m: _load_jsonl(Path(ll_dir) / f"gsm_{m}_k{ll_k}_cis.jsonl") for m in ll_results}
+        # 2. Load Logit-Lens Data
+        ll_k = 6
+        ll_dir = f"outputs/logit_lens/{model_family}"
+        ll_results = _load_data(ll_dir, f"gsm_*_k{ll_k}.json")
+        ll_cis = {m: _load_jsonl(Path(ll_dir) / f"gsm_{m}_k{ll_k}_cis.jsonl") for m in ll_results}
 
-    # 3. Generate Combined Figure
-    if sup_results and ll_results:
-        plot_combined_metrics(sup_results, sup_cis, sup_k, ll_results, ll_cis, ll_k, args.out_dir, args.model_family)
-    else:
-        print("Missing required data to generate combined figure.")
+        if not sup_results and not ll_results:
+            print(f"[skip] {model_family}: no superposition or logit-lens data found")
+            continue
 
-    # 3b. Generate qualitative logit-lens figures for this family
-    plot_logit_lens_examples(args.model_family, ll_dir, args.out_dir, ll_k)
-    plot_attention_bars(args.model_family, ll_dir, args.out_dir, ll_k)
+        # 3. Generate Combined Figure
+        if sup_results and ll_results:
+            plot_combined_metrics(sup_results, sup_cis, sup_k, ll_results, ll_cis, ll_k, args.out_dir, model_family)
+        else:
+            print(f"Missing required data to generate combined figure [{model_family}].")
 
-    # 4. Generate Tables
-    if sup_results:
-        with open(f"{args.tables_dir}/superposition_{args.model_family}.tex", "w") as f:
-            f.write(generate_appendix_main_table(sup_results, _MODES_ORDER, sup_k, sup_cis, family=args.model_family))
-        with open(f"{args.tables_dir}/superposition_extended_{args.model_family}.tex", "w") as f:
-            f.write(generate_table_candidate_parallelism(sup_results, _MODES_ORDER, sup_k) + "\n\n")
-            f.write(generate_table_convergence_trajectories(sup_results, _MODES_ORDER) + "\n\n")
-            f.write(generate_table_per_instance_statistics(sup_results, _MODES_ORDER) + "\n")
-        print(f"Saved LaTeX tables to {args.tables_dir}/")
+        # 3b. Generate qualitative logit-lens figures for this family
+        plot_logit_lens_examples(model_family, ll_dir, args.out_dir, ll_k)
+        plot_attention_bars(model_family, ll_dir, args.out_dir, ll_k)
 
-    # 5. Generate Scratchpad Probing Table (Logit Lens GSM)
-    if ll_results:
-        out_table = Path(args.tables_dir) / f"scratchpad_{args.model_family}.tex"
-        with open(out_table, "w") as f:
-            f.write(generate_table_scratchpad_probing(
-                results=ll_results, 
-                modes=_MODES_ORDER, 
-                all_k=list(range(ll_k + 1)), 
-                ci_data=ll_cis, 
-                family=args.model_family
-            ))
-        print(f"Saved Scratchpad LaTeX table to {out_table}")
+        # 4. Generate Tables
+        if sup_results:
+            with open(f"{args.tables_dir}/superposition_{model_family}.tex", "w") as f:
+                f.write(generate_appendix_main_table(sup_results, _MODES_ORDER, sup_k, sup_cis, family=model_family))
+            with open(f"{args.tables_dir}/superposition_extended_{model_family}.tex", "w") as f:
+                f.write(generate_table_candidate_parallelism(sup_results, _MODES_ORDER, sup_k) + "\n\n")
+                f.write(generate_table_convergence_trajectories(sup_results, _MODES_ORDER) + "\n\n")
+                f.write(generate_table_per_instance_statistics(sup_results, _MODES_ORDER) + "\n")
+            print(f"Saved LaTeX tables to {args.tables_dir}/")
+
+        # 5. Generate Scratchpad Probing Table (Logit Lens GSM)
+        if ll_results:
+            out_table = Path(args.tables_dir) / f"scratchpad_{model_family}.tex"
+            with open(out_table, "w") as f:
+                f.write(generate_table_scratchpad_probing(
+                    results=ll_results,
+                    modes=_MODES_ORDER,
+                    all_k=list(range(ll_k + 1)),
+                    ci_data=ll_cis,
+                    family=model_family
+                ))
+            print(f"Saved Scratchpad LaTeX table to {out_table}")
 
 if __name__ == "__main__":
     main()

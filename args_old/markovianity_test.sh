@@ -7,10 +7,10 @@ set -euo pipefail
 EXPERIMENT="markovianity_test"
 TASK="gsm"
 MODEL_FAMILY="llama"
-MODEL="coconut_u"
-PROJECT_TO_SUBSPACE="all"
-N_GPUS=1
-WALLTIME="10:00:00"
+MODEL="pause"
+PROJECT_TO_SUBSPACE="pred_only"
+N_GPUS=4
+WALLTIME="20:00:00"
 ########################################
 
 LOG_DIR="runs/${EXPERIMENT}"

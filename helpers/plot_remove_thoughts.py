@@ -373,10 +373,6 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
 
     ap.add_argument(
-        "--model_family", choices=["gpt2", "llama"], default=None,
-        help="Restrict to one family. Default: loop all families found on disk.",
-    )
-    ap.add_argument(
         "--out_main_dir", default="Tables/main",
         help="Directory for main-text tables.",
     )
@@ -391,8 +387,7 @@ def main():
 
     args = ap.parse_args()
 
-    families = ([args.model_family] if args.model_family
-                else discover_families(THOUGHT_ABLATION))
+    families = discover_families(THOUGHT_ABLATION)
     if not families:
         print(f"[WARN] No families found under {THOUGHT_ABLATION}")
         return

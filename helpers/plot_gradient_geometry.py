@@ -1,16 +1,22 @@
 """
 Standalone plotting for gradient_subspace_diagnosis.py + bases.npz.
 
-Reads
-    OUT_DIR / <task> / <model> / diagnosis.json   (from diagnosis script)
-    OUT_DIR / <task> / <model> / summary.json     (from gradient_subspace.py)
-    OUT_DIR / <task> / <model> / bases.npz        (from gradient_subspace.py)
+Reads, for each subspace source (gold and pred, independently):
+    OUT_DIR / <family> / <task> / <model> / diagnosis.json   (from gradient_subspace_geometry.py)
+    OUT_DIR / <family> / <task> / <model> / summary.json     (from gradient_subspace.py / _predtoken.py)
+    OUT_DIR / <family> / <task> / <model> / bases.npz        (from gradient_subspace.py / _predtoken.py)
+where OUT_DIR is outputs/gradient_geometry (gold) or
+outputs/gradient_geometry_predtoken (pred). A source is skipped entirely
+if its directory has no diagnosis.json files (e.g. gradient_subspace_geometry.py
+was never run with --subspace_source pred).
 
 Writes
     Plots/gradient_geometry/
-        cos_panels_{model_family}.pdf             -- subspace stability cos^2(B_t, B_{t+1})
+        cos_panels_{model_family}.pdf             -- gold subspace stability cos^2(B_t, B_{t+1})
+        cos_panels_{model_family}_pred.pdf         -- pred subspace, same plot
     Tables/statistical/
-        subspace_geometry_{family}.tex            -- per-family appendix tables
+        subspace_geometry_{family}.tex            -- gold per-family appendix tables
+        (pred subspace has plots only; no LaTeX table is produced for it)
 
 The Q1 / Q2 alignment-of-variance-component panels were removed: they
 conflate magnitude, rank, and per-sample vs population alignment, and
@@ -53,8 +59,17 @@ plt.rcParams.update({
 # ═══════════════════════════════════════════════════════════════════
 
 OUT_DIR = BASE_DIR / "outputs" / "gradient_geometry"
+OUT_DIR_PRED = BASE_DIR / "outputs" / "gradient_geometry_predtoken"
 PLOT_DIR = Path("Plots/gradient_geometry")
 TABLE_DIR = Path("Tables/statistical")
+
+# Subspace sources to discover + plot: (label, source dir, filename suffix).
+# Gold keeps the legacy unsuffixed filenames; pred sits alongside with
+# "_pred" so nothing gets overwritten.
+SOURCES = [
+    ("gold", OUT_DIR, ""),
+    ("pred", OUT_DIR_PRED, "_pred"),
+]
 
 # Recurrent models: their 7th timestep (index 6) has rank 0 and
 # must be excluded when computing averages.
@@ -113,14 +128,14 @@ def sort_task_key(task):
 # Discovery
 # ═══════════════════════════════════════════════════════════════════
 
-def discover_results():
+def discover_results(out_dir):
     """
-    Walk OUT_DIR / <family> / <task> / <model> / and load both
+    Walk out_dir / <family> / <task> / <model> / and load both
     diagnosis.json and bases.npz when both are present.  Also loads
     summary.json (full per-timestep Q1-Q4 statistics) when available.
     """
     results = []
-    for diag_path in sorted(OUT_DIR.glob("*/*/*/diagnosis.json")):
+    for diag_path in sorted(out_dir.glob("*/*/*/diagnosis.json")):
         with open(diag_path, "r") as f:
             r = json.load(f)
         
@@ -434,36 +449,43 @@ def build_all_family_geometry_tables(results) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
-    if not OUT_DIR.exists():
-        raise SystemExit(f"OUT_DIR does not exist: {OUT_DIR}")
     PLOT_DIR.mkdir(parents=True, exist_ok=True)
     TABLE_DIR.mkdir(parents=True, exist_ok=True)
 
-    results = discover_results()
-    if not results:
-        raise SystemExit(f"No diagnosis.json found under {OUT_DIR}/*/*/.")
-
-    # ── Plots by family ─────────────────────────────────────────────
-    families = sorted({r["family"] for r in results}, key=sort_family_key)
-    for family in families:
-        fam_results = [r for r in results if r["family"] == family]
-        plot_path = PLOT_DIR / f"cos_panels_{family}.pdf"
-        plot_cos_panels(fam_results, plot_path)
-
-    # ── Per-family geometry tables ──────────────────────────────────
-    family_tables = build_all_family_geometry_tables(results)
-    for family, tex in family_tables.items():
-        if not tex:
+    any_found = False
+    for source, out_dir, suffix in SOURCES:
+        if not out_dir.exists():
+            print(f"[skip] {source}: {out_dir} does not exist")
             continue
-        p = TABLE_DIR / f"subspace_geometry_{family}.tex"
-        p.write_text(tex)
-        print(f"[tex ] Geometry table [{family}] -> {p.resolve()}")
+        results = discover_results(out_dir)
+        if not results:
+            print(f"[skip] {source}: no diagnosis.json found under "
+                  f"{out_dir}/*/*/*/")
+            continue
+        any_found = True
 
-    # Print tables to stdout for quick inspection
-    sep = "=" * 70
-    for family, tex in family_tables.items():
-        if tex:
-            print(f"\n{sep}\nGEOMETRY TABLE [{family}]\n{sep}\n{tex}")
+        # ── Plots by family ─────────────────────────────────────────
+        families = sorted({r["family"] for r in results}, key=sort_family_key)
+        for family in families:
+            fam_results = [r for r in results if r["family"] == family]
+            plot_path = PLOT_DIR / f"cos_panels_{family}{suffix}.pdf"
+            plot_cos_panels(fam_results, plot_path)
+
+        # ── Per-family geometry tables (gold subspace only) ─────────────
+        if source == "gold":
+            family_tables = build_all_family_geometry_tables(results)
+            for family, tex in family_tables.items():
+                if not tex:
+                    continue
+                p = TABLE_DIR / f"subspace_geometry_{family}{suffix}.tex"
+                p.write_text(tex)
+                print(f"[tex ] Geometry table [{source}/{family}] -> {p.resolve()}")
+
+    if not any_found:
+        raise SystemExit(
+            f"No diagnosis.json found under {OUT_DIR}/*/*/*/ or "
+            f"{OUT_DIR_PRED}/*/*/*/."
+        )
 
 
 if __name__ == "__main__":

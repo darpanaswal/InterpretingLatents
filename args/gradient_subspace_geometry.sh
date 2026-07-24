@@ -8,12 +8,13 @@ EXPERIMENT="gradient_subspace_geometry"
 TASK="gsm"
 MODEL_FAMILY="llama"
 MODEL="coconut"
+SUBSPACE_SOURCE="gold"  # gold | pred | both
 N_GPUS=1
 WALLTIME="02:00:00"
 ########################################
 
 LOG_DIR="runs/${EXPERIMENT}"
-LOG_FILE="${LOG_DIR}/${TASK}_${MODEL_FAMILY}_${MODEL}.txt"
+LOG_FILE="${LOG_DIR}/${TASK}_${MODEL_FAMILY}_${MODEL}_${SUBSPACE_SOURCE}.txt"
 
 # If not inside a SLURM job -> submit self
 if [ -z "${SLURM_JOB_ID:-}" ]; then
@@ -22,7 +23,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     cp "$(readlink -f "$0")" "${SNAPSHOT}"
     chmod +x "${SNAPSHOT}"
     sbatch \
-        --job-name="${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
+        --job-name="${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}_${SUBSPACE_SOURCE}" \
         --output="${LOG_FILE}" \
         --error="${LOG_FILE}" \
         --partition=gpu_p13 \
@@ -47,6 +48,7 @@ conda activate lrm
 echo "Task            : ${TASK}"
 echo "Model Family    : ${MODEL_FAMILY}"
 echo "Model           : ${MODEL}"
+echo "Subspace Source : ${SUBSPACE_SOURCE}"
 echo "GPUs            : ${N_GPUS}"
 echo "Log file        : ${LOG_FILE}"
 
@@ -54,6 +56,7 @@ python -u -m experiments.geometry.gradient_subspace_geometry \
     --task "${TASK}" \
     --model "${MODEL}" \
     --model_family "${MODEL_FAMILY}" \
+    --subspace_source "${SUBSPACE_SOURCE}" \
     >> "${LOG_FILE}" 2>&1
 
 # TO RUN, COPY: bash args/gradient_subspace_geometry.sh

@@ -35,9 +35,19 @@ Bootstrap procedure (Pattern B — function of all instances):
     #   Recompute adjacent/offdiag stability from {B_t^b}
     # CI = percentiles of the B bootstrap statistics
 
+Subspace source (--subspace_source)
+------------------------------------
+Selects which gradient subspace to diagnose:
+    gold  -> outputs/gradient_geometry/            (gradient_subspace.py;
+                                                      gradient of gold-answer NLL)
+    pred  -> outputs/gradient_geometry_predtoken/   (gradient_subspace_predtoken.py;
+                                                      gradient of the model's own
+                                                      predicted-token NLL)
+
 Output
 ------
-    BASE_DIR / outputs / gradient_geometry / <family> / <task> / <model> /
+    BASE_DIR / outputs / <gradient_geometry|gradient_geometry_predtoken> /
+        <family> / <task> / <model> /
         diagnosis.json          point estimates + CIs
         bootstrap_cis.jsonl     machine-readable CI records
 
@@ -45,9 +55,10 @@ Usage
 -----
     python -u -m experiments.geometry.gradient_subspace_diagnosis \
         --task prosqa --model coconut_u
-    # Llama:
+    # Llama, predtoken subspace:
     python -u -m experiments.geometry.gradient_subspace_diagnosis \
-        --task prosqa --model coconut_u --model_family llama
+        --task prosqa --model coconut_u --model_family llama \
+        --subspace_source pred
 """
 
 import json
@@ -62,6 +73,15 @@ from src.bootstrap_stats import (
     DEFAULT_CI,
     DEFAULT_SEED,
 )
+
+# Subspace source -> on-disk tree.
+#   "gold": gradient of gold-answer NLL (gradient_subspace.py)
+#   "pred": gradient of model's own predicted-token NLL
+#           (gradient_subspace_predtoken.py)
+_SUBSPACE_ROOT = {
+    "gold": "gradient_geometry",
+    "pred": "gradient_geometry_predtoken",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -271,56 +291,33 @@ def deep_convert(obj):
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Subspace-stability diagnostic on the gradient "
-                    "subspace produced by gradient_subspace.py."
-    )
-    parser.add_argument("--task", choices=["prosqa", "gsm"], required=True)
-    parser.add_argument(
-        "--model",
-        choices=["coconut", "coconut_u", "pause", "codi"],
-        required=True,
-    )
-    parser.add_argument(
-        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
-        help="Base model family. Must match the family used by "
-             "gradient_subspace.py; selects the namespaced input/output dir.",
-    )
-    parser.add_argument("--bases_path", type=str, default=None,
-                        help="Override path to bases.npz. Default: "
-                             "BASE_DIR/outputs/gradient_geometry/"
-                             "<family>/<task>/<model>/bases.npz")
-    parser.add_argument("--explained_variance", type=float, default=0.95,
-                        help="Cumulative energy threshold for SVD rank "
-                             "selection during bootstrap re-SVD.")
-    parser.add_argument("--n_boot", type=int, default=1000,
-                        help="Number of bootstrap iterations.")
-    parser.add_argument("--seed", type=int, default=0)
-    args = parser.parse_args()
-
-    set_seed(args.seed)
-
+def run(task, model, model_family, subspace_source, bases_path_override,
+        explained_variance, n_boot, seed):
     # Namespaced by family to match gradient_subspace.py's output layout.
-    output_dir = (BASE_DIR / "outputs" / "gradient_geometry"
-                  / args.model_family / args.task / args.model)
+    # Root differs by subspace source: gold -> gradient_geometry,
+    # pred -> gradient_geometry_predtoken (gradient_subspace_predtoken.py).
+    generator = ("gradient_subspace.py" if subspace_source == "gold"
+                 else "gradient_subspace_predtoken.py")
+    output_dir = (BASE_DIR / "outputs" / _SUBSPACE_ROOT[subspace_source]
+                  / model_family / task / model)
     output_dir.mkdir(parents=True, exist_ok=True)
-    bases_path = (Path(args.bases_path) if args.bases_path
+    bases_path = (Path(bases_path_override) if bases_path_override
                   else output_dir / "bases.npz")
     grads_path = output_dir / "gradients.npz"
 
     if not bases_path.exists():
         raise FileNotFoundError(
             f"bases.npz not found at {bases_path}. "
-            f"Run gradient_subspace.py first."
+            f"Run {generator} first."
         )
     if not grads_path.exists():
         raise FileNotFoundError(
             f"gradients.npz not found at {grads_path}. "
-            f"Run gradient_subspace.py first (needed for bootstrap)."
+            f"Run {generator} first (needed for bootstrap)."
         )
 
-    print(f"[main] task={args.task}  model={args.model}  family={args.model_family}")
+    print(f"[main] task={task}  model={model}  "
+          f"family={model_family}  subspace_source={subspace_source}")
     print(f"[main] bases_path: {bases_path}")
     print(f"[main] grads_path: {grads_path}")
     print(f"[main] output_dir: {output_dir}")
@@ -338,25 +335,26 @@ def main():
           f"(N={N}, T={G.shape[1]}, D={G.shape[2]})")
 
     # ── Point estimates + bootstrap CIs ───────────────────────────
-    print(f"\n[main] Running bootstrap (n_boot={args.n_boot})...")
+    print(f"\n[main] Running bootstrap (n_boot={n_boot})...")
     adj_cis, offdiag_ci = bootstrap_stability(
         G, T,
-        explained_variance=args.explained_variance,
-        n_boot=args.n_boot,
-        seed=args.seed,
+        explained_variance=explained_variance,
+        n_boot=n_boot,
+        seed=seed,
     )
 
     # ── Print ──────────────────────────────────────────────────────
     print()
     print("=" * 70)
-    print(f"  GRADIENT-SUBSPACE STABILITY  ({args.task}/{args.model})")
+    print(f"  GRADIENT-SUBSPACE STABILITY  ({task}/{model}/{subspace_source})")
     print("=" * 70)
     print_stability(adj_cis, offdiag_ci)
 
     # ── Save CI records (JSONL) ───────────────────────────────────
     cis_jsonl = str(output_dir / "bootstrap_cis.jsonl")
-    ci_ctx = {"task": args.task, "model": args.model,
-              "model_family": args.model_family}
+    ci_ctx = {"task": task, "model": model,
+              "model_family": model_family,
+              "subspace_source": subspace_source}
     for r in adj_cis:
         save_record(cis_jsonl, r, context=ci_ctx)
     save_record(cis_jsonl, offdiag_ci, context=ci_ctx)
@@ -364,9 +362,10 @@ def main():
 
     # ── Save summary JSON ─────────────────────────────────────────
     summary = {
-        "task": args.task,
-        "model": args.model,
-        "model_family": args.model_family,
+        "task": task,
+        "model": model,
+        "model_family": model_family,
+        "subspace_source": subspace_source,
         "T": int(T),
         "subspace_ranks": ranks,
         "q3_adjacent_per_t": [r.point for r in adj_cis],
@@ -375,13 +374,76 @@ def main():
         ],
         "q3_offdiag_mean": offdiag_ci.point,
         "q3_offdiag_ci": [offdiag_ci.ci_low, offdiag_ci.ci_high],
-        "n_boot": args.n_boot,
-        "explained_variance": args.explained_variance,
+        "n_boot": n_boot,
+        "explained_variance": explained_variance,
     }
     out_path = output_dir / "diagnosis.json"
     with open(out_path, "w") as f:
         json.dump(deep_convert(summary), f, indent=2)
     print(f"[main] Saved diagnosis -> {out_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Subspace-stability diagnostic on the gradient "
+                    "subspace produced by gradient_subspace.py."
+    )
+    parser.add_argument("--task", choices=["prosqa", "gsm"], required=True)
+    parser.add_argument(
+        "--model",
+        choices=["coconut", "coconut_u", "pause", "codi"],
+        required=True,
+    )
+    parser.add_argument(
+        "--model_family", type=str, choices=["gpt2", "llama"], default="gpt2",
+        help="Base model family. Must match the family used by "
+             "gradient_subspace.py; selects the namespaced input/output dir.",
+    )
+    parser.add_argument(
+        "--subspace_source", type=str, choices=["gold", "pred", "both"],
+        default="gold",
+        help="Which gradient subspace to diagnose: 'gold' (gradient of "
+             "gold-answer NLL, from gradient_subspace.py), 'pred' "
+             "(gradient of the model's own predicted-token NLL, from "
+             "gradient_subspace_predtoken.py), or 'both' (run gold then "
+             "pred in one invocation). Selects both the input and output "
+             "directory tree.",
+    )
+    parser.add_argument("--bases_path", type=str, default=None,
+                        help="Override path to bases.npz. Default: "
+                             "BASE_DIR/outputs/<gradient_geometry|"
+                             "gradient_geometry_predtoken>/"
+                             "<family>/<task>/<model>/bases.npz. "
+                             "Ignored when --subspace_source both (each "
+                             "source resolves its own default path).")
+    parser.add_argument("--explained_variance", type=float, default=0.95,
+                        help="Cumulative energy threshold for SVD rank "
+                             "selection during bootstrap re-SVD.")
+    parser.add_argument("--n_boot", type=int, default=1000,
+                        help="Number of bootstrap iterations.")
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
+
+    set_seed(args.seed)
+
+    sources = (["gold", "pred"] if args.subspace_source == "both"
+               else [args.subspace_source])
+
+    if args.bases_path and len(sources) > 1:
+        print(f"[WARN] --bases_path ignored for --subspace_source both "
+              f"(has {len(sources)} sources); each resolves its own "
+              f"default bases.npz.")
+        bases_path_override = None
+    else:
+        bases_path_override = args.bases_path
+
+    for source in sources:
+        run(
+            task=args.task, model=args.model, model_family=args.model_family,
+            subspace_source=source, bases_path_override=bases_path_override,
+            explained_variance=args.explained_variance,
+            n_boot=args.n_boot, seed=args.seed,
+        )
 
 
 if __name__ == "__main__":

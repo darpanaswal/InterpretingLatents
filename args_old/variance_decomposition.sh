@@ -21,7 +21,7 @@ if [ -z "${OAR_JOB_ID:-}" ]; then
     chmod +x "${SNAPSHOT}"
     oarsub \
         -n "${EXPERIMENT}" \
-        -p "network_address='lig-gpu7.imag.fr'" \
+        -p "network_address='lig-gpu1.imag.fr' OR network_address='lig-gpu2.imag.fr' OR network_address='lig-gpu3.imag.fr' OR network_address='lig-gpu4.imag.fr' OR network_address='lig-gpu5.imag.fr' OR network_address='lig-gpu6.imag.fr'" \
         -l /host=1/gpu=${N_GPUS},walltime=${WALLTIME} \
         -O "${LOG_FILE}" \
         -E "${LOG_FILE}" \
@@ -42,4 +42,4 @@ python -u -m experiments.geometry.variance_decomposition \
     --model_family "${MODEL_FAMILY}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash args/variance_decomposition.sh
+# TO RUN, COPY: bash args_old/variance_decomposition.sh

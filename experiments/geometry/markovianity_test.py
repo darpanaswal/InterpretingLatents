@@ -57,6 +57,7 @@ Output files in subspace mode are suffixed with `_subspace` so the
 two modes' results sit side-by-side.
 """
 
+import gc
 import json
 import torch
 import argparse
@@ -184,19 +185,23 @@ def build_pairs(thoughts, order, drop_h0=True, skip_ts=None):
         raise ValueError(
             f"order={order} too large for K+1={Kp1} drop_h0={drop_h0}."
         )
-    X_chunks, Y_chunks, target_ts = [], [], []
-    for t in range(first_target, Kp1):
-        if t in skip_ts:
-            continue
-        ctx = [thoughts[:, t - k, :] for k in range(1, order + 1)]
-        X_chunks.append(torch.cat(ctx, dim=-1))
-        Y_chunks.append(thoughts[:, t, :])
-        target_ts.append(t)
-    if not X_chunks:
+    target_ts = [t for t in range(first_target, Kp1) if t not in skip_ts]
+    if not target_ts:
         return None, None, []
-    return (torch.cat(X_chunks, dim=0),
-            torch.cat(Y_chunks, dim=0),
-            target_ts)
+
+    # Fill preallocated buffers directly instead of building a list of
+    # per-timestep chunks and torch.cat-ing them: cat needs the whole list
+    # AND the freshly-copied output alive at once, transiently ~doubling
+    # peak host memory for large training sets (e.g. many-thought models).
+    n_t = len(target_ts)
+    X = torch.empty(n_t * N, order * D, dtype=thoughts.dtype)
+    Y = torch.empty(n_t * N, D, dtype=thoughts.dtype)
+    for i, t in enumerate(target_ts):
+        sl = slice(i * N, (i + 1) * N)
+        for k in range(1, order + 1):
+            X[sl, (k - 1) * D: k * D] = thoughts[:, t - k, :]
+        Y[sl] = thoughts[:, t, :]
+    return X, Y, target_ts
 
 
 def build_pairs_per_step(thoughts, order, drop_h0=True, skip_ts=None):
@@ -216,34 +221,52 @@ def build_pairs_per_step(thoughts, order, drop_h0=True, skip_ts=None):
 # Models
 # ═══════════════════════════════════════════════════════════════════
 
-def fit_linear_ridge(X_tr, Y_tr, ridge=1.0, device="cpu"):
-    X_tr = X_tr.to(device)
-    Y_tr = Y_tr.to(device)
+def _row_chunk_size(p_aug, itemsize, target_bytes=512 * 1024 * 1024):
+    """Rows per chunk so a [chunk, p_aug] buffer stays around target_bytes."""
+    return max(1024, int(target_bytes // (p_aug * itemsize)))
+
+
+def fit_linear_ridge(X_tr, Y_tr, ridge=1.0, device="cpu", chunk_size=None):
     n, p = X_tr.shape
-    
-    X_aug = torch.cat([torch.ones(n, 1, dtype=X_tr.dtype, device=device),
-                       X_tr], dim=1)
-    A = X_aug.T @ X_aug
-    
+    itemsize = X_tr.element_size()
+    if chunk_size is None:
+        chunk_size = _row_chunk_size(p + 1, itemsize)
+
+    # Accumulate A = X_aug^T X_aug and B = X_aug^T Y in row chunks so we
+    # never materialize the full [n, p+1] augmented matrix on `device`.
+    A = torch.zeros(p + 1, p + 1, dtype=X_tr.dtype, device=device)
+    B = torch.zeros(p + 1, Y_tr.shape[1], dtype=X_tr.dtype, device=device)
+    for i in range(0, n, chunk_size):
+        Xc = X_tr[i:i + chunk_size].to(device)
+        Yc = Y_tr[i:i + chunk_size].to(device)
+        ones = torch.ones(Xc.shape[0], 1, dtype=Xc.dtype, device=device)
+        Xc_aug = torch.cat([ones, Xc], dim=1)
+        A += Xc_aug.T @ Xc_aug
+        B += Xc_aug.T @ Yc
+
     # Create a penalty vector that ONLY regularizes the features.
-    # We multiply by n to keep regularization invariant to dataset size, 
+    # We multiply by n to keep regularization invariant to dataset size,
     # but we DO NOT penalize the bias (index 0).
     penalty = torch.full((p + 1,), ridge * n, dtype=A.dtype, device=device)
     penalty[0] = 0.0  # Leave the bias completely unpenalized
-    
+
     A.diagonal().add_(penalty)
-    
-    B = X_aug.T @ Y_tr
+
     return torch.linalg.solve(A, B)
 
 
-def predict_linear(W_aug, X):
+def predict_linear(W_aug, X, chunk_size=None):
     device = W_aug.device
-    n = X.shape[0]
-    X = X.to(device)
-    X_aug = torch.cat([torch.ones(n, 1, dtype=X.dtype, device=device),
-                       X], dim=1)
-    return (X_aug @ W_aug).cpu()
+    n, p = X.shape
+    if chunk_size is None:
+        chunk_size = _row_chunk_size(p + 1, X.element_size())
+    outs = []
+    for i in range(0, n, chunk_size):
+        Xc = X[i:i + chunk_size].to(device)
+        ones = torch.ones(Xc.shape[0], 1, dtype=Xc.dtype, device=device)
+        Xc_aug = torch.cat([ones, Xc], dim=1)
+        outs.append((Xc_aug @ W_aug).cpu())
+    return torch.cat(outs, dim=0)
 
 
 class MLP(nn.Module):
@@ -268,8 +291,12 @@ def fit_mlp(X_tr, Y_tr, hidden=256, epochs=200, lr=1e-3, weight_decay=1e-4,
     perm = torch.randperm(n, generator=g)
     val_idx, tr_idx = perm[:n_val], perm[n_val:]
 
-    X_in = X_tr[tr_idx].to(device); Y_in = Y_tr[tr_idx].to(device)
-    X_va = X_tr[val_idx].to(device); Y_va = Y_tr[val_idx].to(device)
+    # Keep the splits on CPU; only per-batch slices are moved to `device`.
+    # Avoids materializing the full [n_train, p] / [n_val, p] tensors on the
+    # GPU at once, which for large p (higher orders) can itself OOM.
+    X_in = X_tr[tr_idx]; Y_in = Y_tr[tr_idx]
+    X_va = X_tr[val_idx]; Y_va = Y_tr[val_idx]
+    eval_chunk = batch_size * 8
 
     model = MLP(X_tr.shape[1], Y_tr.shape[1], hidden=hidden).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr,
@@ -282,12 +309,23 @@ def fit_mlp(X_tr, Y_tr, hidden=256, epochs=200, lr=1e-3, weight_decay=1e-4,
         perm_ep = torch.randperm(X_in.shape[0], generator=g)
         for i in range(0, X_in.shape[0], batch_size):
             idx = perm_ep[i:i + batch_size]
+            xb = X_in[idx].to(device); yb = Y_in[idx].to(device)
             opt.zero_grad()
-            loss_fn(model(X_in[idx]), Y_in[idx]).backward()
+            loss_fn(model(xb), yb).backward()
             opt.step()
         model.eval()
         with torch.no_grad():
-            v = loss_fn(model(X_va), Y_va).item()
+            # Weighted mean over chunks reproduces the same value MSELoss
+            # would give over the full X_va/Y_va in one shot (D is constant
+            # across chunks, so a count-weighted average of per-chunk means
+            # equals the mean over all elements).
+            loss_sum, n_seen = 0.0, 0
+            for i in range(0, X_va.shape[0], eval_chunk):
+                xb = X_va[i:i + eval_chunk].to(device)
+                yb = Y_va[i:i + eval_chunk].to(device)
+                loss_sum += loss_fn(model(xb), yb).item() * xb.shape[0]
+                n_seen += xb.shape[0]
+            v = loss_sum / n_seen
         if v < best - 1e-6:
             best = v
             best_state = {k: t.detach().clone()
@@ -411,17 +449,20 @@ def _bootstrap_r2_fast(Y_true, Y_pred, n_boot=1000, ci=95.0,
 
 def identity_prediction(thoughts_eval, order, drop_h0=True, skip_ts=None):
     if skip_ts is None: skip_ts = []
-    N, Kp1, _ = thoughts_eval.shape
+    N, Kp1, D = thoughts_eval.shape
     start_pos = 1 if drop_h0 else 0
-    Y_pred, Y_true = [], []
-    for t in range(start_pos + order, Kp1):
-        if t in skip_ts:
-            continue
-        Y_pred.append(thoughts_eval[:, t - 1, :])
-        Y_true.append(thoughts_eval[:, t, :])
-    if not Y_pred:
+    target_ts = [t for t in range(start_pos + order, Kp1) if t not in skip_ts]
+    if not target_ts:
         return None, None
-    return torch.cat(Y_pred, dim=0), torch.cat(Y_true, dim=0)
+
+    n_t = len(target_ts)
+    Y_pred = torch.empty(n_t * N, D, dtype=thoughts_eval.dtype)
+    Y_true = torch.empty(n_t * N, D, dtype=thoughts_eval.dtype)
+    for i, t in enumerate(target_ts):
+        sl = slice(i * N, (i + 1) * N)
+        Y_pred[sl] = thoughts_eval[:, t - 1, :]
+        Y_true[sl] = thoughts_eval[:, t, :]
+    return Y_pred, Y_true
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -686,6 +727,17 @@ def run(task, model, orders, ridge, mlp_hidden, device, drop_h0=True,
             "mlp_shared_train": _strip_arrays(m_mlp_tr),
         }
 
+        # ─── Free this order's large pair tensors ───────────────────
+        # `X_tr, Y_tr, ... = build_pairs(...)` at the top of the next
+        # iteration evaluates build_pairs() (allocating the *new* order's
+        # tensors) before rebinding the names -- so without this, the
+        # previous order's and next order's multi-GB X_tr/Y_tr/identity
+        # arrays briefly coexist, roughly doubling peak host RAM on
+        # datasets with many training thoughts (e.g. `pause`).
+        del X_tr, Y_tr, X_te, Y_te, Yp_id_tr, Yt_id_tr, Yp_id_te, Yt_id_te
+        del per_tr, per_te
+        gc.collect()
+
     return results
 
 
@@ -727,20 +779,22 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument(
         "--project_to_subspace", type=str,
-        choices=["off", "on", "both", "pred", "pred_only", "all"],
+        choices=["off", "gold", "gold_only", "pred", "pred_only",
+                 "pred_and_gold", "all"],
         default="off",
         help="Project thoughts onto the per-t gradient subspace B_t before "
              "fitting / baselines / evaluation. The subspace source can be "
              "the gold-answer gradient ('gold', from gradient_geometry/) or "
              "the model's own predicted-token gradient ('pred', from "
-             "gradient_geometry_predtoken/). Modes and the runs they produce:\n"
-             "  off       -> [full]                (no projection; default)\n"
-             "  on        -> [gold]                (gold subspace only)\n"
-             "  both      -> [full, gold]          (legacy default pair)\n"
-             "  pred      -> [full, pred]          (predtoken subspace + full)\n"
-             "  pred_only -> [pred]                (ONLY the predtoken subspace;\n"
-             "                                      skips full + gold reruns)\n"
-             "  all       -> [full, gold, pred]    (everything)\n"
+             "gradient_geometry_predtoken/). Each mode names the runs it "
+             "produces, out of {full, gold, pred}:\n"
+             "  off           -> [full]                 (no projection; default)\n"
+             "  gold          -> [full, gold]            (full + gold subspace)\n"
+             "  gold_only     -> [gold]                  (ONLY the gold subspace)\n"
+             "  pred          -> [full, pred]            (full + predtoken subspace)\n"
+             "  pred_only     -> [pred]                  (ONLY the predtoken subspace)\n"
+             "  pred_and_gold -> [gold, pred]             (both subspaces, no full)\n"
+             "  all           -> [full, gold, pred]       (everything)\n"
              "Projected runs get a `_subspace` (gold) or `_subspace_pred` "
              "(pred) filename suffix so all variants sit side-by-side.",
     )
@@ -768,18 +822,20 @@ def main():
     # Each plan is (project_to_subspace: bool, subspace_source: str).
     # subspace_source is ignored when project_to_subspace is False.
     PLANS = {
-        "off":       [(False, "gold")],
-        "on":        [(True,  "gold")],
-        "both":      [(False, "gold"), (True, "gold")],
-        "pred":      [(False, "gold"), (True, "pred")],
-        "pred_only": [(True,  "pred")],
-        "all":       [(False, "gold"), (True, "gold"), (True, "pred")],
+        "off":           [(False, "gold")],
+        "gold":          [(False, "gold"), (True, "gold")],
+        "gold_only":     [(True,  "gold")],
+        "pred":          [(False, "gold"), (True, "pred")],
+        "pred_only":     [(True,  "pred")],
+        "pred_and_gold": [(True,  "gold"), (True, "pred")],
+        "all":           [(False, "gold"), (True, "gold"), (True, "pred")],
     }
     run_plans = PLANS[args.project_to_subspace]
 
     # --bases_path is a single path; it can only safely apply when the mode
-    # has exactly one projected source. For multi-source modes (both/pred/all)
-    # ignore it and let each source resolve its own default tree.
+    # has exactly one projected source. For multi-source modes (gold/pred/
+    # pred_and_gold/all) ignore it and let each source resolve its own
+    # default tree.
     n_projected = sum(1 for p, _ in run_plans if p)
     if args.bases_path and n_projected != 1:
         print(f"[WARN] --bases_path ignored for mode "

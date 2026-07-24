@@ -348,14 +348,11 @@ def discover_families() -> list:
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--model_family", choices=["gpt2", "llama"], default=None,
-                    help="Restrict to one family. Default: loop all families "
-                         "found under outputs/markovianity/.")
     ap.add_argument("--tables_dir", default="Tables/statistical",
                     help="Directory for markovianity_<family>.tex files.")
     args = ap.parse_args()
 
-    families = ([args.model_family] if args.model_family else discover_families())
+    families = discover_families()
     if not families:
         print(f"[WARN] No families found under {OUT_DIR}")
         return
