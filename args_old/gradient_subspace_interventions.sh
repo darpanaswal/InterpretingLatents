@@ -47,6 +47,7 @@ python -u -m experiments.ablation.gradient_subspace_interventions \
     --model_family "${MODEL_FAMILY}" \
     --model "${MODEL}" \
     --n_gpus "${N_GPUS}" \
+    --force_ablation \
     >> "${LOG_FILE}" 2>&1
 
 # TO RUN, COPY: bash args_old/gradient_subspace_interventions.sh

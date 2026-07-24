@@ -6,8 +6,8 @@ set -euo pipefail
 ########################################
 EXPERIMENT="gradient_subspace_interventions_predtoken"
 TASK="gsm"
-MODEL_FAMILY="llama"
-MODEL="codi"
+MODEL_FAMILY="gpt2"
+MODEL="coconut_u"
 N_GPUS=4
 WALLTIME="6:00:00"
 ########################################
