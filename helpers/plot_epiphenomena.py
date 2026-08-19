@@ -2,6 +2,7 @@
 import json
 import argparse
 import math
+import re
 import numpy as np
 from pathlib import Path
 import matplotlib
@@ -140,26 +141,24 @@ def _metric_ylim(results, modes, all_k, summary_key, pct):
     return (max(-0.01, lo - pad), hi + pad)
 
 # ═══════════════════════════════════════════════════════════════════
-# Combined Plotting: Superposition (Row 1) & Logit-Lens (Row 2)
+# Split Plotting: Superposition figure & Logit-Lens/Scratchpad figure
+# (one standalone 1x3 figure per group, each with its own legend)
 # ═══════════════════════════════════════════════════════════════════
-def plot_combined_metrics(sup_results, sup_cis, sup_k, ll_results, ll_cis, ll_k, out_dir, model_family):
+def plot_superposition_metrics(sup_results, sup_cis, sup_k, ll_k, out_dir, model_family):
     """
-    Creates a 2x3 grid figure.
-    Row 1: Entropy, P(correct), Cand. Mass (Top-1 Correct removed).
-    Row 2: Hit Rate, Superposition, Step Alignment.
+    Creates a standalone 1x3 figure: Entropy, P(correct), Cand. Mass.
     Legend: Placed on the right side.
     """
-    fig, axes = plt.subplots(2, 3, figsize=(8.5, 3.2), gridspec_kw={'wspace': 0.35, 'hspace': 0.6})
-    
-    # ─── Row 1: Superposition Metrics ───
+    fig, axes = plt.subplots(1, 3, figsize=(8.5, 1.8), gridspec_kw={'wspace': 0.35})
+
     sup_metrics = [
         ("mean_normalized_entropy", "normalized_entropy", "Entropy", r"$H/\log_2 N$", False, 2),
         ("mean_value_correct", "value_correct", r"$P(\mathrm{correct})$", r"$P(\mathrm{correct})$", False, 2),
         ("mean_candidate_mass", "candidate_mass", "Cand. Mass", "Cand. mass", False, 2),
     ]
     panel_labels_r1 = ["(a)", "(b)", "(c)"]
-    
-    for ax, (summary_key, ci_key, title, ylabel, pct, decimals), panel_label in zip(axes[0], sup_metrics, panel_labels_r1):
+
+    for ax, (summary_key, ci_key, title, ylabel, pct, decimals), panel_label in zip(axes, sup_metrics, panel_labels_r1):
         ylim = _metric_ylim(sup_results, _MODES_ORDER, sup_k, summary_key, pct)
         endpoints = []
         
@@ -215,15 +214,34 @@ def plot_combined_metrics(sup_results, sup_cis, sup_k, ll_results, ll_cis, ll_k,
         ax.set_xlim(min(sup_k) - 0.2, max(sup_k) + 2.5)
         ax.set_xticks(sup_k)
 
-    # ─── Row 2: Logit-Lens Metrics ───
+    # ─── Legend on the right ───
+    fig.subplots_adjust(right=0.88)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="center left", bbox_to_anchor=(0.89, 0.5),
+               ncol=1, fontsize=6, frameon=True, framealpha=0.8, edgecolor="#cccccc",
+               handlelength=2.0, handletextpad=0.5)
+
+    out_path = Path(out_dir) / f"epiphenomena_{model_family}_superposition.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved Superposition Figure to: {out_path}")
+
+
+def plot_scratchpad_metrics(ll_results, ll_cis, ll_k, out_dir, model_family):
+    """
+    Creates a standalone 1x3 figure: Hit Rate, Superposition, Step Alignment.
+    Legend: Placed on the right side.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(8.5, 1.8), gridspec_kw={'wspace': 0.35})
+
     ll_metrics = [
         ("hit_rate", "Intermediate Hit Rate", "Hit rate (%)", "(d)", "endpoint_right", (-2, 82), None),
         ("superposition_rate", "Superposition Rate", "Superposition (%)", "(e)", "endpoint_right", (-1, 30), None),
         ("alignment_rate", "Step Alignment", "Step alignment (%)", "(f)", "start_right", (-2, 68), 1.0)
     ]
     steps = list(range(ll_k + 1))
-    
-    for ax, (key, title_str, ylabel, panel_label, annotate, ylim, skip_below) in zip(axes[1], ll_metrics):
+
+    for ax, (key, title_str, ylabel, panel_label, annotate, ylim, skip_below) in zip(axes, ll_metrics):
         endpoints, peaks, starts = [], [], []
         
         for model in _MODES_ORDER:
@@ -281,17 +299,17 @@ def plot_combined_metrics(sup_results, sup_cis, sup_k, ll_results, ll_cis, ll_k,
         ax.set_xlim(-0.2, ll_k + 2.8)
         ax.set_xticks(steps)
 
-    # ─── Adjust layout and place shared legend on the right ───
+    # ─── Legend on the right ───
     fig.subplots_adjust(right=0.88)
-    handles, labels = axes[0,0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="center left", bbox_to_anchor=(0.89, 0.5), 
-               ncol=1, fontsize=6, frameon=True, framealpha=0.8, edgecolor="#cccccc", 
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="center left", bbox_to_anchor=(0.89, 0.5),
+               ncol=1, fontsize=6, frameon=True, framealpha=0.8, edgecolor="#cccccc",
                handlelength=2.0, handletextpad=0.5)
 
-    out_path = Path(out_dir) / f"epiphenomena_{model_family}.pdf"
+    out_path = Path(out_dir) / f"epiphenomena_{model_family}_scratchpad.pdf"
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved Combined Figure to: {out_path}")
+    print(f"Saved Scratchpad Figure to: {out_path}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -750,7 +768,12 @@ def _load_data(data_dir, file_pattern):
     results = {}
     if not Path(data_dir).exists(): return results
     for f in sorted(Path(data_dir).glob(file_pattern)):
-        mode = f.stem.split("_k")[0].split("_")[-1] if "_k" in f.stem else f.stem.replace("results_", "")
+        if "_k" in f.stem:
+            # e.g. "gsm_coconut_u_k6" -> task prefix "gsm_", trailing "_k6": mode = "coconut_u"
+            task_prefix, _, rest = f.stem.partition("_")
+            mode = re.sub(r"_k\d+$", "", rest)
+        else:
+            mode = f.stem.replace("results_", "")
         if mode in _MODES_ORDER:
             with open(f) as fh:
                 results[mode] = json.load(fh)
@@ -782,11 +805,16 @@ def main():
             print(f"[skip] {model_family}: no superposition or logit-lens data found")
             continue
 
-        # 3. Generate Combined Figure
-        if sup_results and ll_results:
-            plot_combined_metrics(sup_results, sup_cis, sup_k, ll_results, ll_cis, ll_k, args.out_dir, model_family)
+        # 3. Generate Superposition & Scratchpad Figures (standalone, own legend each)
+        if sup_results:
+            plot_superposition_metrics(sup_results, sup_cis, sup_k, ll_k, args.out_dir, model_family)
         else:
-            print(f"Missing required data to generate combined figure [{model_family}].")
+            print(f"Missing superposition data to generate figure [{model_family}].")
+
+        if ll_results:
+            plot_scratchpad_metrics(ll_results, ll_cis, ll_k, args.out_dir, model_family)
+        else:
+            print(f"Missing logit-lens data to generate scratchpad figure [{model_family}].")
 
         # 3b. Generate qualitative logit-lens figures for this family
         plot_logit_lens_examples(model_family, ll_dir, args.out_dir, ll_k)
