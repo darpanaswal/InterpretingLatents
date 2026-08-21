@@ -319,8 +319,14 @@ def _active_ranks(ranks, model):
 # Per-family appendix table
 # ═══════════════════════════════════════════════════════════════════
 
-def build_per_family_geometry_table(family, family_results) -> str:
-    """Build one appendix table for a single model family."""
+def build_per_family_geometry_table(family, family_results, source="gold", suffix="") -> str:
+    """Build one appendix table for a single model family.
+
+    `source`/`suffix` distinguish the gold-subspace table (default,
+    unsuffixed, unchanged from before) from the predicted-token-subspace
+    table (source="pred", suffix="_pred") so captions/labels don't collide
+    when both are generated.
+    """
     sorted_results = sorted(
         family_results,
         key=lambda r: (sort_task_key(r["task"]), sort_model_key(r["model"])),
@@ -330,6 +336,8 @@ def build_per_family_geometry_table(family, family_results) -> str:
 
     T = sorted_results[0]["diagnosis"]["T"]
     family_label = FAMILY_LABELS.get(family, family)
+    subspace_label = ("gold-answer" if source == "gold"
+                       else "model-predicted-token")
 
     t_headers = " & ".join([f"$k_{{{t}}}$" for t in range(T)])
     col_spec = "ll" + "r" * T + "r" + "c" + "c" + "r"
@@ -340,14 +348,15 @@ def build_per_family_geometry_table(family, family_results) -> str:
         r"\small",
         r"\setlength{\tabcolsep}{2.5pt}",
         (rf"\caption{{Gradient-subspace diagnostics for the "
-         rf"{family_label} family. Per-timestep subspace rank $k_t$ at "
+         rf"{family_label} family, {subspace_label} subspace. "
+         r"Per-timestep subspace rank $k_t$ at "
          r"$\rho{=}0.95$, mean rank $\bar k$ (degenerate final step "
          r"excluded for recurrent models), adjacent-step similarity "
          r"$\overline{\cos^2}(B_t, B_{t+1})$, off-diagonal mean "
          r"similarity $\overline{\cos^2}(B_t, B_{t'})$ with 95\% "
          r"bootstrap CIs, and the pooled norm fraction "
          r"$\|h^c\|/\|h\|$ retained in the causal subspace.}"),
-        rf"\label{{tab:subspace_geometry_{family}}}",
+        rf"\label{{tab:subspace_geometry_{family}{suffix}}}",
         rf"\begin{{tabular}}{{{col_spec}}}",
         r"\toprule",
         (f"Task & Model & {t_headers} & $\\bar k$ "
@@ -432,7 +441,7 @@ def build_per_family_geometry_table(family, family_results) -> str:
     return "\n".join(lines)
 
 
-def build_all_family_geometry_tables(results) -> dict:
+def build_all_family_geometry_tables(results, source="gold", suffix="") -> dict:
     """Return {family: latex_str} for every family present in results."""
     families = sorted(
         {r["family"] for r in results}, key=sort_family_key
@@ -440,7 +449,8 @@ def build_all_family_geometry_tables(results) -> dict:
     out = {}
     for family in families:
         fam_results = [r for r in results if r["family"] == family]
-        out[family] = build_per_family_geometry_table(family, fam_results)
+        out[family] = build_per_family_geometry_table(
+            family, fam_results, source=source, suffix=suffix)
     return out
 
 
@@ -471,15 +481,15 @@ def main():
             plot_path = PLOT_DIR / f"cos_panels_{family}{suffix}.pdf"
             plot_cos_panels(fam_results, plot_path)
 
-        # ── Per-family geometry tables (gold subspace only) ─────────────
-        if source == "gold":
-            family_tables = build_all_family_geometry_tables(results)
-            for family, tex in family_tables.items():
-                if not tex:
-                    continue
-                p = TABLE_DIR / f"subspace_geometry_{family}{suffix}.tex"
-                p.write_text(tex)
-                print(f"[tex ] Geometry table [{source}/{family}] -> {p.resolve()}")
+        # ── Per-family geometry tables (both gold and pred subspaces) ────
+        family_tables = build_all_family_geometry_tables(
+            results, source=source, suffix=suffix)
+        for family, tex in family_tables.items():
+            if not tex:
+                continue
+            p = TABLE_DIR / f"subspace_geometry_{family}{suffix}.tex"
+            p.write_text(tex)
+            print(f"[tex ] Geometry table [{source}/{family}] -> {p.resolve()}")
 
     if not any_found:
         raise SystemExit(

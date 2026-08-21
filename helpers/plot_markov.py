@@ -218,9 +218,16 @@ def plot_heatmaps(data, out_path, subspace_source="gold"):
                 # Account for MLP overfitting: if identity/mean is close to linear/mlp, prefer inert
                 best_inert = max(pts.get("identity_baseline", -float('inf')), pts.get("mean_baseline", -float('inf')))
                 best_active = max(pts.get("linear_shared", -float('inf')), pts.get("mlp_shared", -float('inf')))
-                
+
                 OVERFIT_MARGIN = 0.1
-                if best_inert >= best_active - OVERFIT_MARGIN:
+                # "Static" requires the inert predictor to *itself* explain most of
+                # the variance (absolute floor), not merely to be no-worse-than-active
+                # within a margin -- otherwise two mediocre scores (e.g. 0.45 vs 0.53)
+                # can get called "static" even though neither captures the dynamics.
+                # 0.7 sits in the empirical gap between "clearly copies forward"
+                # (>=0.75 in every observed case) and "mediocre/ambiguous" (<=0.66).
+                STATIC_FLOOR = 0.7
+                if best_inert >= STATIC_FLOOR and best_inert >= best_active - OVERFIT_MARGIN:
                     inert_models.append(model)
                 else:
                     active_models.append(model)

@@ -149,7 +149,7 @@ def plot_superposition_metrics(sup_results, sup_cis, sup_k, ll_k, out_dir, model
     Creates a standalone 1x3 figure: Entropy, P(correct), Cand. Mass.
     Legend: Placed on the right side.
     """
-    fig, axes = plt.subplots(1, 3, figsize=(8.5, 1.8), gridspec_kw={'wspace': 0.35})
+    fig, axes = plt.subplots(1, 3, figsize=(8.5, 1.25), gridspec_kw={'wspace': 0.35})
 
     sup_metrics = [
         ("mean_normalized_entropy", "normalized_entropy", "Entropy", r"$H/\log_2 N$", False, 2),
@@ -232,7 +232,7 @@ def plot_scratchpad_metrics(ll_results, ll_cis, ll_k, out_dir, model_family):
     Creates a standalone 1x3 figure: Hit Rate, Superposition, Step Alignment.
     Legend: Placed on the right side.
     """
-    fig, axes = plt.subplots(1, 3, figsize=(8.5, 1.8), gridspec_kw={'wspace': 0.35})
+    fig, axes = plt.subplots(1, 3, figsize=(8.5, 1.25), gridspec_kw={'wspace': 0.35})
 
     ll_metrics = [
         ("hit_rate", "Intermediate Hit Rate", "Hit rate (%)", "(d)", "endpoint_right", (-2, 82), None),
