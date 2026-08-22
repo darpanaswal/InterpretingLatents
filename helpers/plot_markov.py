@@ -8,11 +8,11 @@ CI logs. Produces, per family:
     Plots/markov/markov_heatmaps_<family>_pred.pdf  -- full thoughts + PRED
                                                         (predicted-token)
                                                         subspace
-    Tables/statistical/markovianity_<family>.tex    -- appendix table, GOLD
-                                                        subspace only (the
-                                                        pred subspace does
-                                                        NOT get its own
-                                                        table)
+    Tables/statistical/markovianity_<family>.tex      -- appendix table, GOLD
+                                                          subspace
+    Tables/statistical/markovianity_<family>_pred.tex -- appendix table, PRED
+                                                          (predicted-token)
+                                                          subspace
 """
 
 import csv
@@ -384,12 +384,15 @@ def main():
                 subspace_source=subspace_source,
             )
 
-        # Appendix table: gold subspace only, unchanged from before (no
-        # pred-subspace table is produced).
-        data_gold = discover_results(data_dir, subspace_source="gold")
-        out_path = tables_dir / f"markovianity_{family}.tex"
-        build_appendix_table(data_gold, family, out_path,
-                             subspace_source="gold")
+        # Appendix tables: one per subspace source, mirroring the heatmap
+        # loop above. Gold keeps the legacy unsuffixed filename; pred sits
+        # alongside with a "_pred" suffix so neither overwrites the other.
+        for subspace_source in ("gold", "pred"):
+            data = discover_results(data_dir, subspace_source=subspace_source)
+            src_tag = "" if subspace_source == "gold" else "_pred"
+            out_path = tables_dir / f"markovianity_{family}{src_tag}.tex"
+            build_appendix_table(data, family, out_path,
+                                 subspace_source=subspace_source)
 
 
 if __name__ == "__main__":

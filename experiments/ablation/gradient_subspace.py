@@ -67,7 +67,8 @@ Output layout
 All artefacts go to:
     BASE_DIR / outputs / gradient_geometry / <task> / <model> /
         bases.npz      -- {f"B_t{t}": B_t}, the per-timestep bases
-        gradients.npz  -- raw G (N, T, D), losses, ranks
+        gradients.npz  -- raw G (N, T, D) gradients, H (N, T, D) thought
+                          vectors, losses, ranks
         extraction.json -- extraction stats (no diagnostics)
 
 Usage
@@ -203,7 +204,8 @@ def extract_gradient_coconut(
     gold_ids = tokenizer.encode(gold_text, add_special_tokens=False)
     if len(gold_ids) == 0:
         D = h.shape[0]
-        return np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0
+        return (np.zeros((n_thoughts + 1, D), dtype=np.float32),
+                np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0)
 
     # NLL on the gold answer:
     #   # nll = - sum_j log p(y_j | prompt, thoughts, y_{<j})
@@ -242,8 +244,11 @@ def extract_gradient_coconut(
         print(f"  [grad] note: {n_unused}/{len(h_leaves)} leaves "
               f"were unused (zero-padded).")
     grads = np.stack(grads_arr, axis=0)
+    hidden = np.stack(
+        [hl.detach().to(torch.float32).cpu().numpy() for hl in h_leaves], axis=0,
+    )
 
-    return grads, float(nll.detach().cpu().item())
+    return grads, hidden, float(nll.detach().cpu().item())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -339,7 +344,9 @@ def extract_gradient_pause(
 
     gold_ids = tokenizer.encode(gold_text, add_special_tokens=False)
     if len(gold_ids) == 0:
-        return np.zeros((n_thoughts + 1, pause_emb.shape[0]), dtype=np.float32), 0.0
+        D = pause_emb.shape[0]
+        return (np.zeros((n_thoughts + 1, D), dtype=np.float32),
+                np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0)
 
     log_probs_first = torch.log_softmax(answer_logits_first, dim=-1)
     nll = -log_probs_first[gold_ids[0]]
@@ -366,8 +373,11 @@ def extract_gradient_pause(
         else:
             grads_arr.append(g.detach().to(torch.float32).cpu().numpy())
     grads = np.stack(grads_arr, axis=0)
+    hidden = np.stack(
+        [hl.detach().to(torch.float32).cpu().numpy() for hl in h_leaves], axis=0,
+    )
 
-    return grads, float(nll.detach().cpu().item())
+    return grads, hidden, float(nll.detach().cpu().item())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -480,7 +490,8 @@ def extract_gradient_codi(codi_dict, sample, n_thoughts, device, gold_text, task
     gold_ids = tokenizer.encode(gold_text, add_special_tokens=False)
     if len(gold_ids) == 0:
         D = h.shape[0]
-        return np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0
+        return (np.zeros((n_thoughts + 1, D), dtype=np.float32),
+                np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0)
 
     log_probs_first = torch.log_softmax(answer_logits_first, dim=-1)
     nll = -log_probs_first[gold_ids[0]]
@@ -516,8 +527,11 @@ def extract_gradient_codi(codi_dict, sample, n_thoughts, device, gold_text, task
         else:
             grads_arr.append(g.detach().to(torch.float32).cpu().numpy())
     grads = np.stack(grads_arr, axis=0)
+    hidden = np.stack(
+        [hl.detach().to(torch.float32).cpu().numpy() for hl in h_leaves], axis=0,
+    )
 
-    return grads, float(nll.detach().cpu().item())
+    return grads, hidden, float(nll.detach().cpu().item())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -599,6 +613,7 @@ def extract_subspace(args, data, codi_dict, coconut_model, base_model,
     Returns:
         bases:             dict[t -> (D, k_t) np.ndarray]
         G:                 (N, T, D) raw gradients
+        H:                 (N, T, D) raw hidden states (thought vectors h_t)
         losses:            (N,) per-instance NLLs
         ranks:             list[int] of subspace ranks per t
         sv_per_t:          dict[t -> list[float]]  singular values
@@ -611,6 +626,7 @@ def extract_subspace(args, data, codi_dict, coconut_model, base_model,
     print(f"[grad] instances={N}  T={T}  D={D}")
 
     G = np.zeros((N, T, D), dtype=np.float32)
+    H = np.zeros((N, T, D), dtype=np.float32)
     losses = np.zeros(N, dtype=np.float32)
     n_skipped = 0
 
@@ -624,16 +640,16 @@ def extract_subspace(args, data, codi_dict, coconut_model, base_model,
             continue
         try:
             if codi_dict is not None:
-                grads, loss = extract_gradient_codi(
+                grads, hidden, loss = extract_gradient_codi(
                     codi_dict, sample, K, args.device, gold_text, args.task,
                 )
             elif pause:
-                grads, loss = extract_gradient_pause(
+                grads, hidden, loss = extract_gradient_pause(
                     coconut_model, base_model, tokenizer, sample, K,
                     args.device, start_id, latent_id, end_id, gold_text,
                 )
             else:
-                grads, loss = extract_gradient_coconut(
+                grads, hidden, loss = extract_gradient_coconut(
                     base_model, tokenizer, sample, K, args.device,
                     start_id, end_id, gold_text,
                 )
@@ -644,6 +660,7 @@ def extract_subspace(args, data, codi_dict, coconut_model, base_model,
             continue
 
         G[idx] = grads
+        H[idx] = hidden
         losses[idx] = loss
 
     print(f"\n[grad] Extracted gradients for {N - n_skipped}/{N} instances "
@@ -688,7 +705,7 @@ def extract_subspace(args, data, codi_dict, coconut_model, base_model,
         print(f"  [svd] {t:>3}  {k:>6}  {sv[0]:>10.4e}  "
               f"{sv_min_kept:>12.4e}  {cum_var_kept:>13.4f}")
 
-    return bases, G, losses, ranks, sv_per_t, cum_var_per_t, n_skipped
+    return bases, G, H, losses, ranks, sv_per_t, cum_var_per_t, n_skipped
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -764,7 +781,7 @@ def main():
     pause = (not is_codi) and is_pause_model(coconut_model)
 
     # ── Extract gradients + per-timestep SVD ───────────────────────
-    bases, G, losses, ranks, sv_per_t, cum_var_per_t, n_skipped = \
+    bases, G, H, losses, ranks, sv_per_t, cum_var_per_t, n_skipped = \
         extract_subspace(
             args, data, codi_dict, coconut_model, base_model,
             tokenizer, latent_id, start_id, end_id, D, pause,
@@ -780,11 +797,12 @@ def main():
     grads_path = output_dir / "gradients.npz"
     np.savez(
         grads_path,
-        G=G,                                # (N, T, D)
+        G=G,                                # (N, T, D) gradients dL/dh_t
+        H=H,                                # (N, T, D) thought vectors h_t
         losses=losses,                      # (N,)
         ranks=np.array(ranks),
     )
-    print(f"[main] Saved raw gradients -> {grads_path}")
+    print(f"[main] Saved raw gradients + hidden states -> {grads_path}")
 
     summary = {
         "task": args.task,

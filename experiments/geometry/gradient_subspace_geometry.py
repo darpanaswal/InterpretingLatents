@@ -171,6 +171,41 @@ def _bases_from_G(G, T, explained_variance=0.95):
 #   # mean_cos_sq   = mean(cos^2)       in [0, 1]
 # ═══════════════════════════════════════════════════════════════════
 
+def norm_budget(H, bases, T):
+    """
+    Pooled norm fraction ||h^c|| / ||h|| retained in the causal subspace.
+
+    For each timestep t, projects every instance's thought vector h_{i,t}
+    onto the gradient subspace B_t and measures what fraction of ||h_{i,t}||
+    survives the projection. Rows with near-zero norm (failed/skipped
+    instances, padded with zeros upstream) are excluded.
+
+    Returns:
+        per_t:  list[float], mean fraction per timestep (nan if no valid
+                rows or empty basis at that t)
+        pooled: 1-D np.ndarray of per-instance fractions pooled across all
+                timesteps with a nonempty basis (for a single summary stat)
+    """
+    per_t = []
+    pooled_chunks = []
+    for t in range(T):
+        B = bases.get(t, np.zeros((H.shape[2], 0)))
+        H_t = H[:, t, :].astype(np.float64)
+        h_norm = np.linalg.norm(H_t, axis=1)
+        valid = h_norm > 1e-12
+        if B.shape[1] == 0 or not valid.any():
+            per_t.append(float("nan"))
+            continue
+        proj = H_t[valid] @ B          # (n_valid, k)
+        hc_norm = np.linalg.norm(proj, axis=1)
+        frac = hc_norm / h_norm[valid]
+        per_t.append(float(np.mean(frac)))
+        pooled_chunks.append(frac)
+    pooled = (np.concatenate(pooled_chunks) if pooled_chunks
+              else np.zeros(0, dtype=np.float64))
+    return per_t, pooled
+
+
 def mean_cos_sq(B1, B2):
     if B1.shape[1] == 0 or B2.shape[1] == 0:
         return 0.0
@@ -334,6 +369,23 @@ def run(task, model, model_family, subspace_source, bases_path_override,
     print(f"[main] gradient matrix G: {G.shape}  "
           f"(N={N}, T={G.shape[1]}, D={G.shape[2]})")
 
+    # ── Norm-budget: ||h^c|| / ||h|| retained in the causal subspace ──
+    # H (thought vectors) is only present in gradients.npz produced by
+    # the current gradient_subspace(_predtoken).py; older runs predate it.
+    if "H" in blob.files:
+        q4_per_t, q4_pooled = norm_budget(blob["H"], bases, T)
+        q4_pooled_mean = (float(np.mean(q4_pooled))
+                           if q4_pooled.size else float("nan"))
+        print(f"[main] Pooled ||h^c||/||h||: {q4_pooled_mean:.4f}  "
+              f"(n={q4_pooled.size})")
+    else:
+        print("[main] WARN: gradients.npz has no 'H' (hidden states); "
+              "run gradient_subspace(_predtoken).py again to fill "
+              "||h^c||/||h||. Recording as nan.")
+        q4_per_t = [float("nan")] * T
+        q4_pooled_mean = float("nan")
+        q4_pooled = np.zeros(0, dtype=np.float64)
+
     # ── Point estimates + bootstrap CIs ───────────────────────────
     print(f"\n[main] Running bootstrap (n_boot={n_boot})...")
     adj_cis, offdiag_ci = bootstrap_stability(
@@ -374,6 +426,11 @@ def run(task, model, model_family, subspace_source, bases_path_override,
         ],
         "q3_offdiag_mean": offdiag_ci.point,
         "q3_offdiag_ci": [offdiag_ci.ci_low, offdiag_ci.ci_high],
+        "q4_norm_budget_per_t": q4_per_t,
+        "q4_norm_budget_pooled": {
+            "mean": q4_pooled_mean,
+            "n": int(q4_pooled.size),
+        },
         "n_boot": n_boot,
         "explained_variance": explained_variance,
     }

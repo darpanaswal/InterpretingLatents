@@ -42,6 +42,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 from dataclasses import asdict
+from safetensors.torch import load_file as load_safetensors
 
 from src.config import BASE_DIR, THOUGHTS, VARIANCE_DECOMPOSITION
 from src.bootstrap_stats import bootstrap_variance_decomposition as shared_bootstrap_variance_decomposition
@@ -86,8 +87,7 @@ class Logger:
 # ═══════════════════════════════════════════════════════════════════
 
 def load_thoughts(path):
-    data = torch.load(path, map_location=DEVICE, weights_only=False)
-    return data["thoughts"]
+    return load_safetensors(str(path), device=str(DEVICE))["thoughts"]
 
 def try_load(path):
     """Returns torch.Tensor or None if the file does not exist."""
@@ -98,7 +98,7 @@ def try_load(path):
 def load_original_thoughts(task, model_name, family="gpt2"):
     """Load only the original thoughts."""
     base_dir = THOUGHTS / family / task
-    orig_path = base_dir / f"thoughts_{model_name}.pt"
+    orig_path = base_dir / f"thoughts_{model_name}.safetensors"
     orig = try_load(orig_path)
     if orig is None:
         raise FileNotFoundError(

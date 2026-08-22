@@ -4,12 +4,18 @@ Extract continuous thought vectors from a trained Coconut or CODI model.
 For each ProsQA/GSM instance, runs K steps of continuous-thought recurrence
 and saves the final hidden state h_t at each step t = 0, ..., K.
 
-Output: a single .pt file containing:
-    - "thoughts": Tensor of shape (N, K+1, D)
+Output: a .safetensors file (THOUGHTS/<family>/<task>/thoughts_<model>[_train].safetensors)
+containing:
+    - tensor "thoughts": shape (N, K+1, D)
         N = number of instances, K = recurrence steps,
         D = hidden dim (768 for GPT-2, 2048 for Llama-3.2-1B)
-    - "instance_indices": list of ints, mapping row i to its index
-    - "n_thoughts": int, the K used
+    - string metadata: n_thoughts, model, model_family, data_path, split
+
+safetensors (not .pt/torch.save) so consumers can mmap/load "thoughts"
+directly onto a GPU device via safetensors.torch.load_file(path,
+device=...), skipping the CPU round-trip a pickled torch.load + .to(device)
+requires. Old .pt-only extractions can be backfilled with
+helpers/convert_thoughts_to_safetensors.py.
 
 Usage:
     python extract_thoughts.py --model coconut --n_thoughts 6
@@ -17,12 +23,13 @@ Usage:
     python extract_thoughts.py --model coconut_u --model_family llama --n_thoughts 6
 """
 
+import gc
 import json
 import queue
 import torch
 import argparse
-import tempfile
 import torch.multiprocessing as mp
+from safetensors.torch import save_file as save_safetensors
 from pathlib import Path
 from transformers import AutoTokenizer
 from src.utils import (
@@ -628,6 +635,14 @@ def _extract_thoughts_worker(
     return_queue.put({"rank": rank, "meta": meta})
 
 
+def _shards_dir(task, model_name, model_family, n_gpus):
+    """Deterministic (not a random tempfile.mkdtemp suffix) so a run that
+    crashes AFTER extraction but during the merge/save can be resumed by
+    reusing the already-extracted shards -- the expensive, hours-long
+    part -- instead of re-running extraction from scratch."""
+    return THOUGHTS / f"_shards_{model_family}_{task}_{model_name}_g{n_gpus}"
+
+
 def extract_thoughts_multigpu(
     task, model_name, model_family, n_thoughts, splits_data, n_gpus,
     batch_size=32,
@@ -637,73 +652,103 @@ def extract_thoughts_multigpu(
     and extracts thoughts for its shard of every split in `splits_data`
     (a list of (split_name, data) pairs).
 
-    Returns: dict {split_name: (N_split, K+1, D) tensor ordered like the
-    corresponding `data`}.
+    Returns: (dict {split_name: (N_split, K+1, D) tensor}, tmp_dir). The
+    caller (main()) is responsible for deleting tmp_dir, and must only do
+    so after every split's final output has been written successfully --
+    this function never deletes shard files itself. That's the fix for a
+    real incident: the merge loop used to unlink() each shard right after
+    folding it into the in-memory result, before the final file was ever
+    written -- an OOM during merge (which is exactly what happened) lost
+    already-completed shards for nothing recoverable. Now they survive
+    until true success, and a subsequent identical invocation resumes
+    from them (see the resume check below) instead of burning the GPU
+    hours to redo extraction.
     """
+    THOUGHTS.mkdir(parents=True, exist_ok=True)
     # Shard files land under THOUGHTS (project storage), not the default
     # system temp dir: a compute node's /tmp is sometimes small or tmpfs
     # (RAM-backed), and a llama train shard can be multi-GB — writing
     # several of those concurrently risks filling /tmp outright, which
     # would be a second, dumber way to lose a run.
-    THOUGHTS.mkdir(parents=True, exist_ok=True)
-    tmp_dir = Path(tempfile.mkdtemp(prefix="extract_thoughts_shards_",
-                                    dir=str(THOUGHTS)))
-    ctx = mp.get_context("spawn")
-    q = ctx.Queue()
-    procs = []
-    for rank in range(n_gpus):
-        p = ctx.Process(
-            target=_extract_thoughts_worker,
-            args=(rank, n_gpus, task, model_name, model_family, n_thoughts,
-                  splits_data, batch_size, tmp_dir, q),
-        )
-        p.start()
-        procs.append(p)
+    tmp_dir = _shards_dir(task, model_name, model_family, n_gpus)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    def _kill_all_workers():
-        # On any fatal error below, stop every worker instead of leaving
-        # survivors to keep burning GPU-hours for a result nobody will
-        # ever collect — exactly what happened before this fix existed.
+    expected = [
+        tmp_dir / f"shard_r{rank}_{split_name}.pt"
+        for rank in range(n_gpus)
+        for split_name, _ in splits_data
+    ]
+    if expected and all(p.exists() for p in expected):
+        print(f"[INFO] found a complete set of {len(expected)} shard(s) already "
+              f"extracted in {tmp_dir} -- resuming from them instead of "
+              "re-running extraction.", flush=True)
+        shards = [
+            {"meta": {
+                split_name: {
+                    "indices": _shard_indices(len(data), n_gpus, rank),
+                    "path": str(tmp_dir / f"shard_r{rank}_{split_name}.pt"),
+                }
+                for split_name, data in splits_data
+            }}
+            for rank in range(n_gpus)
+        ]
+    else:
+        ctx = mp.get_context("spawn")
+        q = ctx.Queue()
+        procs = []
+        for rank in range(n_gpus):
+            p = ctx.Process(
+                target=_extract_thoughts_worker,
+                args=(rank, n_gpus, task, model_name, model_family, n_thoughts,
+                      splits_data, batch_size, tmp_dir, q),
+            )
+            p.start()
+            procs.append(p)
+
+        def _kill_all_workers():
+            # On any fatal error below, stop every worker instead of leaving
+            # survivors to keep burning GPU-hours for a result nobody will
+            # ever collect — exactly what happened before this fix existed.
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()
+            for p in procs:
+                p.join(timeout=10)
+
+        shards = []
+        try:
+            for _ in range(n_gpus):
+                while True:
+                    try:
+                        res = q.get(timeout=5.0)
+                        shards.append(res)
+                        break
+                    except queue.Empty:
+                        for p in procs:
+                            if not p.is_alive() and p.exitcode != 0:
+                                raise RuntimeError(
+                                    f"Worker process {p.pid} crashed with exit code {p.exitcode}. "
+                                    "Check console for CUDA Out-Of-Memory or other runtime errors."
+                                )
+                    except (EOFError, ConnectionResetError, BrokenPipeError) as e:
+                        # Transient IPC hiccup on the (now tiny) metadata
+                        # message. Only a small dict travels through the queue
+                        # now, so retrying is safe and cheap; treat a dead
+                        # worker the same way as the queue.Empty branch above.
+                        print(f"[WARN] transient queue receive error ({e!r}); "
+                              "retrying...", flush=True)
+                        for p in procs:
+                            if not p.is_alive() and p.exitcode != 0:
+                                raise RuntimeError(
+                                    f"Worker process {p.pid} crashed with exit code {p.exitcode}. "
+                                    "Check console for CUDA Out-Of-Memory or other runtime errors."
+                                )
+        except BaseException:
+            _kill_all_workers()
+            raise
+
         for p in procs:
-            if p.is_alive():
-                p.terminate()
-        for p in procs:
-            p.join(timeout=10)
-
-    shards = []
-    try:
-        for _ in range(n_gpus):
-            while True:
-                try:
-                    res = q.get(timeout=5.0)
-                    shards.append(res)
-                    break
-                except queue.Empty:
-                    for p in procs:
-                        if not p.is_alive() and p.exitcode != 0:
-                            raise RuntimeError(
-                                f"Worker process {p.pid} crashed with exit code {p.exitcode}. "
-                                "Check console for CUDA Out-Of-Memory or other runtime errors."
-                            )
-                except (EOFError, ConnectionResetError, BrokenPipeError) as e:
-                    # Transient IPC hiccup on the (now tiny) metadata
-                    # message. Only a small dict travels through the queue
-                    # now, so retrying is safe and cheap; treat a dead
-                    # worker the same way as the queue.Empty branch above.
-                    print(f"[WARN] transient queue receive error ({e!r}); "
-                          "retrying...", flush=True)
-                    for p in procs:
-                        if not p.is_alive() and p.exitcode != 0:
-                            raise RuntimeError(
-                                f"Worker process {p.pid} crashed with exit code {p.exitcode}. "
-                                "Check console for CUDA Out-Of-Memory or other runtime errors."
-                            )
-    except BaseException:
-        _kill_all_workers()
-        raise
-
-    for p in procs:
-        p.join()
+            p.join()
 
     K = n_thoughts
     all_thoughts = {}
@@ -718,11 +763,14 @@ def extract_thoughts_multigpu(
                 split_thoughts = torch.zeros(len(data), K + 1, D)
             for local_idx, idx in enumerate(r["indices"]):
                 split_thoughts[idx] = shard_tensor[local_idx]
-            Path(r["path"]).unlink(missing_ok=True)
+            # Do NOT delete the shard file here -- see docstring. Freeing
+            # the loaded tensor promptly does still help peak memory
+            # during the merge itself (this is where the OOM happened).
+            del shard_tensor
+            gc.collect()
         all_thoughts[split_name] = split_thoughts
 
-    tmp_dir.rmdir()
-    return all_thoughts
+    return all_thoughts, tmp_dir
 
 
 def main():
@@ -796,7 +844,7 @@ def main():
         # Namespace by family so gpt2 and llama runs don't clobber each other.
         return str(
             THOUGHTS / f"{args.model_family}/{args.task}/"
-            f"thoughts_{args.model}{suffix}.pt"
+            f"thoughts_{args.model}{suffix}.safetensors"
         )
 
     print(f"[INFO] Model: {args.model}  Family: {args.model_family}")
@@ -808,12 +856,13 @@ def main():
     is_codi = (args.model == "codi")
     data_by_split = {s: load_data(args.task, s, args.max_instances) for s in splits}
 
+    shards_tmp_dir = None
     if args.n_gpus > 1:
         total_n = sum(len(d) for d in data_by_split.values())
         print(f"[INFO] Multi-GPU: sharding {total_n} instances across "
               f"{args.n_gpus} GPUs (model loaded once per GPU, shared "
               f"across split(s) {splits})")
-        thoughts_by_split = extract_thoughts_multigpu(
+        thoughts_by_split, shards_tmp_dir = extract_thoughts_multigpu(
             args.task, args.model, args.model_family, K,
             list(data_by_split.items()), args.n_gpus,
             batch_size=args.batch_size,
@@ -861,19 +910,35 @@ def main():
         all_thoughts = thoughts_by_split[split]
         N, Kp1, D = all_thoughts.shape
         output_path = _output_path(split)
-        save_dict = {
-            "thoughts": all_thoughts,
-            "instance_indices": list(range(N)),
-            "n_thoughts": K,
+        # safetensors only stores tensors + a flat string->string metadata
+        # header (no arbitrary Python objects) -- "instance_indices" used
+        # to be saved but was always trivially range(N) and no consumer
+        # ever read it back, so it's dropped rather than round-tripped.
+        metadata = {
+            "n_thoughts": str(K),
             "model": args.model,
             "model_family": args.model_family,
             "data_path": str(_data_path(args.task, split)),
             "split": split,
         }
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(save_dict, output_path)
+        save_safetensors(
+            {"thoughts": all_thoughts.contiguous()}, output_path,
+            metadata=metadata,
+        )
         print(f"[INFO] split={split}: Saved {N} x {Kp1} x {D} thought "
               f"vectors to {output_path}")
+
+    # Only now -- every split's .safetensors file is confirmed written --
+    # is it safe to remove the multi-GPU shard files. If anything above
+    # raised (e.g. an OOM during the merge, which is what actually
+    # happened once), we never reach here and the shards are left in
+    # place for the next run to resume from instead of re-extracting.
+    if shards_tmp_dir is not None:
+        for f in shards_tmp_dir.glob("*.pt"):
+            f.unlink(missing_ok=True)
+        shards_tmp_dir.rmdir()
+        print(f"[INFO] cleaned up shard directory {shards_tmp_dir}")
 
 if __name__ == "__main__":
     main()

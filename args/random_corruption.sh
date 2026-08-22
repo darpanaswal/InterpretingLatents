@@ -24,10 +24,11 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     cp "$(readlink -f "$0")" "${SNAPSHOT}"
     chmod +x "${SNAPSHOT}"
     sbatch \
+        --export=ALL,SNAPSHOT_FILE="${SNAPSHOT}" \
         --job-name="${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
         --output="${LOG_FILE}" \
         --error="${LOG_FILE}" \
-        --partition=gpu_p13 \
+        --partition=gpu_p2,gpu_p2s,gpu_p2l \
         --nodes=1 \
         --ntasks=1 \
         --cpus-per-task=$((N_GPUS * 4)) \
@@ -39,7 +40,9 @@ fi
 
 
 # Inside SLURM job -> run experiment
-rm -f "$0"
+if [ -n "${SNAPSHOT_FILE:-}" ]; then
+    rm -f "${SNAPSHOT_FILE}"
+fi
 module purge
 module load anaconda-py3/2024.06
 source $WORK/env_cache_guard.sh

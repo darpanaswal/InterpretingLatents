@@ -2,15 +2,16 @@
 set -euo pipefail
 
 ########################################
-# CONFIGURE HERE
+# CONFIGURE HERE (env-overridable, e.g.
+#   TASK=gsm MODEL_FAMILY=llama MODEL=codi bash args/gradient_subspace_predtoken.sh)
 ########################################
 EXPERIMENT="gradient_subspace_predtoken"
-TASK="gsm"
-MODEL_FAMILY="gpt2"
-MODEL="codi"
-MAX_NEW=12
-N_GPUS=1
-WALLTIME="12:00:00"
+TASK="${TASK:-gsm}"
+MODEL_FAMILY="${MODEL_FAMILY:-llama}"
+MODEL="${MODEL:-coconut_u}"
+MAX_NEW="${MAX_NEW:-12}"
+N_GPUS="${N_GPUS:-1}"
+WALLTIME="${WALLTIME:-12:00:00}"
 ########################################
 
 LOG_DIR="runs/${EXPERIMENT}"
@@ -22,22 +23,29 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SNAPSHOT="$(mktemp "${LOG_DIR}/.snapshot.XXXXXX.sh")"
     cp "$(readlink -f "$0")" "${SNAPSHOT}"
     chmod +x "${SNAPSHOT}"
-    sbatch \
+    JOBID=$(sbatch --parsable \
+        --export=ALL,SNAPSHOT_FILE="${SNAPSHOT}" \
         --job-name="${EXPERIMENT}_${TASK}_${MODEL_FAMILY}_${MODEL}" \
         --output="${LOG_FILE}" \
         --error="${LOG_FILE}" \
-        --partition=gpu_p13 \
+        --partition=gpu_p2,gpu_p2s,gpu_p2l \
         --nodes=1 \
         --ntasks=1 \
         --cpus-per-task=$((N_GPUS * 4)) \
         --gres=gpu:${N_GPUS} \
         --time="${WALLTIME}" \
+        ${SBATCH_EXTRA_ARGS:-} \
         "${SNAPSHOT}"
+    )
+    echo "${JOBID}"
     exit 0
 fi
 
 # Inside SLURM job -> run experiment
-rm -f "$0"
+if [ -n "${SNAPSHOT_FILE:-}" ]; then
+    rm -f "${SNAPSHOT_FILE}"
+fi
+
 module purge
 module load anaconda-py3/2024.06
 source $WORK/env_cache_guard.sh
@@ -60,3 +68,4 @@ python -u -m experiments.ablation.gradient_subspace_predtoken \
     >> "${LOG_FILE}" 2>&1
 
 # TO RUN, COPY: bash args/gradient_subspace_predtoken.sh
+# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi bash args/gradient_subspace_predtoken.sh

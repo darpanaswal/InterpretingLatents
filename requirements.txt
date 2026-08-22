@@ -1,7 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch==2.5.1
 numpy<2
-transformers>=4.45.0,<5.0.0
+transformers>=4.48.3
 datasets
 wandb
 tqdm
@@ -12,6 +12,7 @@ peft
 huggingface_hub
 pandas
 python-dotenv
+safetensors
 
 
 # accelerate==1.7.0

@@ -4,9 +4,8 @@ runs
 model
 reason
 primitive
-*.pt
 .vscode
+thoughts
 outputs
-.tex
 .claude
 commit.sh

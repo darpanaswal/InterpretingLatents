@@ -51,7 +51,7 @@ GSM_MODELS = MODEL_DIR / "gsm"
 
 OUTPUTS = BASE_DIR / "outputs"
 CONTROL_EXPT = OUTPUTS / "superposition"
-THOUGHTS = OUTPUTS / "thoughts"
+THOUGHTS = BASE_DIR / "thoughts"
 INLP = OUTPUTS / "inlp"
 VARIANCE_DECOMPOSITION = OUTPUTS / "variance_decomposition"
 THOUGHT_ABLATION = OUTPUTS / "remove_thoughts"

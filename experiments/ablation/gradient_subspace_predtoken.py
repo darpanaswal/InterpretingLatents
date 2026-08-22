@@ -189,7 +189,8 @@ def extract_gradient_coconut_pred(
     if yhat0 == eos_id:
         # Degenerate: model predicts eos immediately. No usable target.
         D = h.shape[0]
-        return np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0
+        return (np.zeros((n_thoughts + 1, D), dtype=np.float32),
+                np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0)
     nll = -log_probs_first[yhat0]
     pred_ids = [yhat0]
 
@@ -218,7 +219,10 @@ def extract_gradient_coconut_pred(
         else:
             grads_arr.append(g.detach().to(torch.float32).cpu().numpy())
     grads = np.stack(grads_arr, axis=0)
-    return grads, float(nll.detach().cpu().item())
+    hidden = np.stack(
+        [hl.detach().to(torch.float32).cpu().numpy() for hl in h_leaves], axis=0,
+    )
+    return grads, hidden, float(nll.detach().cpu().item())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -284,7 +288,9 @@ def extract_gradient_pause_pred(
     log_probs_first = torch.log_softmax(answer_logits_first, dim=-1)
     yhat0 = int(torch.argmax(answer_logits_first).item())
     if yhat0 == eos_id:
-        return np.zeros((n_thoughts + 1, pause_emb.shape[0]), dtype=np.float32), 0.0
+        D = pause_emb.shape[0]
+        return (np.zeros((n_thoughts + 1, D), dtype=np.float32),
+                np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0)
     nll = -log_probs_first[yhat0]
     pred_ids = [yhat0]
 
@@ -313,7 +319,10 @@ def extract_gradient_pause_pred(
         else:
             grads_arr.append(g.detach().to(torch.float32).cpu().numpy())
     grads = np.stack(grads_arr, axis=0)
-    return grads, float(nll.detach().cpu().item())
+    hidden = np.stack(
+        [hl.detach().to(torch.float32).cpu().numpy() for hl in h_leaves], axis=0,
+    )
+    return grads, hidden, float(nll.detach().cpu().item())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -418,7 +427,8 @@ def extract_gradient_codi_pred(codi_dict, sample, n_thoughts, device, max_new):
     yhat0 = int(torch.argmax(answer_logits_first).item())
     if yhat0 == eos_id:
         D = h.shape[0]
-        return np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0
+        return (np.zeros((n_thoughts + 1, D), dtype=np.float32),
+                np.zeros((n_thoughts + 1, D), dtype=np.float32), 0.0)
     nll = -log_probs_first[yhat0]
     pred_ids = [yhat0]
 
@@ -457,7 +467,10 @@ def extract_gradient_codi_pred(codi_dict, sample, n_thoughts, device, max_new):
         else:
             grads_arr.append(g.detach().to(torch.float32).cpu().numpy())
     grads = np.stack(grads_arr, axis=0)
-    return grads, float(nll.detach().cpu().item())
+    hidden = np.stack(
+        [hl.detach().to(torch.float32).cpu().numpy() for hl in h_leaves], axis=0,
+    )
+    return grads, hidden, float(nll.detach().cpu().item())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -472,6 +485,7 @@ def extract_subspace_pred(args, data, codi_dict, coconut_model, base_model,
     print(f"[pred] instances={N}  T={T}  D={D}  max_new={args.max_new}")
 
     G = np.zeros((N, T, D), dtype=np.float32)
+    H = np.zeros((N, T, D), dtype=np.float32)
     losses = np.zeros(N, dtype=np.float32)
     n_skipped = 0
 
@@ -481,16 +495,16 @@ def extract_subspace_pred(args, data, codi_dict, coconut_model, base_model,
                   f"{losses[:idx].mean():.4f}")
         try:
             if codi_dict is not None:
-                grads, loss = extract_gradient_codi_pred(
+                grads, hidden, loss = extract_gradient_codi_pred(
                     codi_dict, sample, K, args.device, args.max_new,
                 )
             elif pause:
-                grads, loss = extract_gradient_pause_pred(
+                grads, hidden, loss = extract_gradient_pause_pred(
                     coconut_model, base_model, tokenizer, sample, K,
                     args.device, start_id, latent_id, end_id, args.max_new,
                 )
             else:
-                grads, loss = extract_gradient_coconut_pred(
+                grads, hidden, loss = extract_gradient_coconut_pred(
                     base_model, tokenizer, sample, K, args.device,
                     start_id, end_id, args.max_new,
                 )
@@ -500,6 +514,7 @@ def extract_subspace_pred(args, data, codi_dict, coconut_model, base_model,
             n_skipped += 1
             continue
         G[idx] = grads
+        H[idx] = hidden
         losses[idx] = loss
 
     print(f"\n[pred] Extracted gradients for {N - n_skipped}/{N} instances "
@@ -530,7 +545,7 @@ def extract_subspace_pred(args, data, codi_dict, coconut_model, base_model,
         ranks.append(k)
         print(f"  [svd] {t:>3}  {k:>6}")
 
-    return bases, G, losses, ranks, n_skipped
+    return bases, G, H, losses, ranks, n_skipped
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -609,7 +624,7 @@ def main():
     data = load_data(args.task, args.max_instances)
     pause = (not is_codi) and is_pause_model(coconut_model)
 
-    bases_pred, G, losses, ranks, n_skipped = extract_subspace_pred(
+    bases_pred, G, H, losses, ranks, n_skipped = extract_subspace_pred(
         args, data, codi_dict, coconut_model, base_model,
         tokenizer, latent_id, start_id, end_id, D, pause,
     )
@@ -623,8 +638,8 @@ def main():
     print(f"\n[main] Saved predicted-token bases -> {bases_path}")
 
     grads_path = output_dir / "gradients.npz"
-    np.savez(grads_path, G=G, losses=losses, ranks=np.array(ranks))
-    print(f"[main] Saved predicted-token gradients -> {grads_path}")
+    np.savez(grads_path, G=G, H=H, losses=losses, ranks=np.array(ranks))
+    print(f"[main] Saved predicted-token gradients + hidden states -> {grads_path}")
 
     # ── Load gold bases and compare via principal angles ───────────
     # Gold lives in the ORIGINAL gradient_geometry/ tree, not our output_dir.

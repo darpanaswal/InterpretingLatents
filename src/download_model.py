@@ -1,4 +1,5 @@
 import os
+import re
 
 os.environ["HF_HUB_OFFLINE"] = "0"
 os.environ["TRANSFORMERS_OFFLINE"] = "0"
@@ -11,11 +12,14 @@ print(BASE_DIR)
 
 login(token=hf_token)
 
-REPO_ID = "thomas-ferraz/model_name-coconut-u0.3-FF-GSM8kAug-Jul9-ckpt17"
-LOCAL_DIR = f"{BASE_DIR}/model/gsm/llama/coconut_u"
+REPO_ID = "https://huggingface.co/thomas-ferraz/model_name-pause-GSM8kAug-Jun8-ckpt19"
+LOCAL_DIR = f"{BASE_DIR}/model/gsm/llama/pause"
 
 
 def smart_download(repo_id, local_dir, **kw):
+    # strip scheme + host if a full URL was passed instead of a bare repo id
+    repo_id = re.sub(r"^https?://(huggingface\.co|hf\.co)/", "", repo_id.strip())
+
     try:
         # valid repo id (namespace/repo_name) → whole repo
         return snapshot_download(repo_id=repo_id, local_dir=local_dir, **kw)

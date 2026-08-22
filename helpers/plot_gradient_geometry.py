@@ -2,8 +2,9 @@
 Standalone plotting for gradient_subspace_diagnosis.py + bases.npz.
 
 Reads, for each subspace source (gold and pred, independently):
-    OUT_DIR / <family> / <task> / <model> / diagnosis.json   (from gradient_subspace_geometry.py)
-    OUT_DIR / <family> / <task> / <model> / summary.json     (from gradient_subspace.py / _predtoken.py)
+    OUT_DIR / <family> / <task> / <model> / diagnosis.json   (from gradient_subspace_geometry.py;
+                                                                includes q4_norm_budget_pooled,
+                                                                the ||h^c||/||h|| retained fraction)
     OUT_DIR / <family> / <task> / <model> / bases.npz        (from gradient_subspace.py / _predtoken.py)
 where OUT_DIR is outputs/gradient_geometry (gold) or
 outputs/gradient_geometry_predtoken (pred). A source is skipped entirely
@@ -131,24 +132,19 @@ def sort_task_key(task):
 def discover_results(out_dir):
     """
     Walk out_dir / <family> / <task> / <model> / and load both
-    diagnosis.json and bases.npz when both are present.  Also loads
-    summary.json (full per-timestep Q1-Q4 statistics) when available.
+    diagnosis.json and bases.npz when both are present. diagnosis.json
+    (written by gradient_subspace_geometry.py) carries the q4 norm-budget
+    fields directly, so no separate summary file is needed.
     """
     results = []
     for diag_path in sorted(out_dir.glob("*/*/*/diagnosis.json")):
         with open(diag_path, "r") as f:
             r = json.load(f)
-        
+
         family = r.get("model_family")
         if family is None:
             family = diag_path.parent.parent.parent.name
-            
-        summary_path = diag_path.parent / "summary.json"
-        summary = None
-        if summary_path.exists():
-            with open(summary_path, "r") as f:
-                summary = json.load(f)
-                
+
         bases_path = diag_path.parent / "bases.npz"
         bases = None
         if bases_path.exists():
@@ -165,7 +161,6 @@ def discover_results(out_dir):
             "task":      r["task"],
             "model":     r["model"],
             "diagnosis": r,
-            "summary":   summary,
             "bases":     bases,
         })
     return results
@@ -396,12 +391,8 @@ def build_per_family_geometry_table(family, family_results, source="gold", suffi
             q3_offdiag_mean = d.get("q3_offdiag_mean", float("nan"))
             q3_offdiag_ci = d.get("q3_offdiag_ci", [None, None])
 
-            summary = r.get("summary")
-            if summary and "grad" in summary:
-                q4_pooled = summary["grad"].get("q4_norm_budget_pooled", {})
-                q4_mean = q4_pooled.get("mean", float("nan"))
-            else:
-                q4_mean = float("nan")
+            q4_pooled = d.get("q4_norm_budget_pooled", {})
+            q4_mean = q4_pooled.get("mean", float("nan"))
 
             rank_cells = [
                 (r"\textcolor{gray}{--}" if rk == 0 else str(rk))

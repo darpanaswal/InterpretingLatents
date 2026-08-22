@@ -12,6 +12,47 @@ from src.config import BASE_GPT2, PROSQA_MODELS, GSM_MODELS, PROSQA_TEST, GSM_TE
 # 128 tokens.  256 matches remove_thoughts.py / the original CODI test.py.
 MAX_DECODE_TOKENS = 256
 
+_peft_tp_shard_patched = False
+
+
+def _patch_peft_tp_shard_noop():
+    """
+    Some peft versions unconditionally import
+    transformers.integrations.tensor_parallel inside their internal
+    _maybe_shard_state_dict_for_tp() -- even when tensor-parallel loading
+    isn't in use -- which doesn't exist in transformers==4.48.3 (pinned
+    here; newer transformers breaks eager attention for this project) and
+    crashes every LoRA checkpoint load with:
+        ModuleNotFoundError: No module named 'transformers.integrations.tensor_parallel'
+
+    We never use transformers' own tensor-parallel sharding of a single
+    model across GPUs -- this project's multi-GPU usage is data-parallel
+    (one full model replica per rank, sharding instances not weights), so
+    the function's real job (shard the state dict across a TP mesh) is a
+    no-op for us regardless; the bug is that even the "not using TP" path
+    unconditionally does the import before it would find that out. Patching
+    it to just return the state dict unchanged is what the correct
+    behavior would already be for our case.
+
+    Idempotent (checked via a module-level flag) and defensive: if a given
+    peft version doesn't have this function at all, this is a silent no-op.
+    The existing non-zero-adapter-norm sanity check right after
+    PeftModel.from_pretrained() would already catch a genuinely broken
+    load, so this is self-verifying at each call site that uses it.
+    """
+    global _peft_tp_shard_patched
+    if _peft_tp_shard_patched:
+        return
+    try:
+        import peft.utils.save_and_load as _peft_save_and_load
+        if hasattr(_peft_save_and_load, "_maybe_shard_state_dict_for_tp"):
+            def _noop_shard_for_tp(model, state_dict, adapter_name):
+                return state_dict
+            _peft_save_and_load._maybe_shard_state_dict_for_tp = _noop_shard_for_tp
+    except ImportError:
+        pass
+    _peft_tp_shard_patched = True
+
 
 def extract_answer_number(text: str, task: str = "gsm"):
     """
@@ -635,6 +676,7 @@ def setup_model_and_tokenizer(task, mode, device, family="gpt2"):
     # --- Llama LoRA Loading (skipped for full-FT) ---
     if family == "llama" and mode != "base" and not llama_full_ft:
         from peft import PeftModel
+        _patch_peft_tp_shard_noop()
         print(f"Loading Llama LoRA checkpoint: {checkpoint_path}")
         model = PeftModel.from_pretrained(model, checkpoint_path, is_trainable=False)
         # Sanity: confirm an adapter is active and has non-zero norm.

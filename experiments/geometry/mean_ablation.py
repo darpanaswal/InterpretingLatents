@@ -49,6 +49,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 import torch.multiprocessing as mp
+from safetensors.torch import load_file as load_safetensors
 from src.config import BASE_DIR, PROSQA_TEST, GSM_TEST, THOUGHTS, set_seed
 from src.utils import (
     run_codi_single_alpha,
@@ -114,16 +115,15 @@ def deep_convert(obj):
 
 def load_train_thoughts(task, model, family="gpt2"):
     # Layout matches extract_thoughts.py / markovianity_test.py:
-    # THOUGHTS/<family>/<task>/thoughts_<model>_train.pt
-    path = THOUGHTS / family / task / f"thoughts_{model}_train.pt"
+    # THOUGHTS/<family>/<task>/thoughts_<model>_train.safetensors
+    path = THOUGHTS / family / task / f"thoughts_{model}_train.safetensors"
     if not path.exists():
         raise FileNotFoundError(
             f"Train thoughts not found at {path}. "
             f"Run extract_thoughts.py --split train for "
             f"--task {task} --model {model} --model_family {family}."
         )
-    blob = torch.load(path, map_location="cpu", weights_only=False)
-    return blob["thoughts"]
+    return load_safetensors(str(path), device="cpu")["thoughts"]
 
 def compute_temporal_stats(train_thoughts):
     train = train_thoughts.float()
