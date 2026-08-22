@@ -10,7 +10,7 @@ TASK="${TASK:-gsm}"
 MODEL_FAMILY="${MODEL_FAMILY:-llama}"
 MODEL="${MODEL:-codi}"
 GRANULARITY="${GRANULARITY:-single}"
-BATCH_SIZE="${BATCH_SIZE:-100}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
 MAX_INSTANCES="${MAX_INSTANCES:-2000}"
 DEBUG="${DEBUG:-false}"
 VERIFY_BATCHED="${VERIFY_BATCHED:-false}"
@@ -89,4 +89,4 @@ fi
 "${CMD[@]}" > "${LOG_FILE}" 2>&1
 
 # TO RUN, COPY: bash args/causal_trace.sh
-# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi bash args/causal_trace.sh
+# TO OVERRIDE, COPY: TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash args/causal_trace.sh
