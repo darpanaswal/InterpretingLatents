@@ -125,6 +125,7 @@ def fmt_float(val, decimals=2):
 def _metric_ylim(results, modes, all_k, summary_key, pct):
     vals = []
     for mode in modes:
+        if mode not in results: continue
         for k in all_k:
             value = results[mode]["summary"].get(str(k), {}).get(summary_key)
             if value is None or math.isnan(value):
@@ -544,7 +545,7 @@ def _bfs_data_rows(results, modes, all_k, ci_data, blocks):
         row = [str(k)]
         for summary_key, ci_key, pct, decimals in blocks:
             for m in modes:
-                v = results[m]["summary"].get(str(k), {}).get(summary_key, float("nan"))
+                v = results.get(m, {}).get("summary", {}).get(str(k), {}).get(summary_key, float("nan"))
                 rec = _find_ci_record(ci_data.get(m, []), ci_key, {"t": int(k)})
                 row.append(_fmt_with_ci(v, rec, pct=pct, decimals=decimals))
         rows.append(" & ".join(row) + " \\\\")
@@ -612,6 +613,9 @@ def generate_table_candidate_parallelism(results, modes, all_k):
     for k in all_k[:5]:
         row = [str(k)]
         for m in modes:
+            if m not in results:
+                row.append("- & - & -")
+                continue
             s = results[m]["summary"].get(str(k), {})
             t1, t3 = s.get("mean_top1_prob", float("nan")), s.get("mean_top3_cumul", float("nan"))
             if math.isnan(t1):
@@ -634,6 +638,9 @@ def generate_table_convergence_trajectories(results, modes):
         "\\midrule"
     ]
     for m in modes:
+        if m not in results:
+            latex.append(" & ".join([_LABELS_LONG[m], "-", "-", "-", "-"]) + " \\\\")
+            continue
         s0, s4 = results[m]["summary"].get("0", {}), results[m]["summary"].get("4", {})
         row = [
             _LABELS_LONG[m],
@@ -662,7 +669,7 @@ def generate_table_per_instance_statistics(results, modes):
     row_n = ["$n$"]
     
     for m in modes:
-        per_inst = results[m].get("per_instance", {})
+        per_inst = results.get(m, {}).get("per_instance", {})
         n_total = n_inc = n_top1 = n_ent = 0
         for si, k_data in per_inst.items():
             ks = sorted(int(k) for k in k_data)
