@@ -67,5 +67,24 @@ python -u -m experiments.ablation.gradient_subspace_predtoken \
     --max_new "${MAX_NEW}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/gradient_subspace_predtoken.sh
-# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi bash slurm/gradient_subspace_predtoken.sh
+# RUN GPT2
+
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause bash slurm/gradient_subspace_predtoken.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/gradient_subspace_predtoken.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/gradient_subspace_predtoken.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi bash slurm/gradient_subspace_predtoken.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause bash slurm/gradient_subspace_predtoken.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/gradient_subspace_predtoken.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/gradient_subspace_predtoken.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi bash slurm/gradient_subspace_predtoken.sh
+
+# RUN LLAMA
+
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/gradient_subspace_predtoken.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut bash slurm/gradient_subspace_predtoken.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u bash slurm/gradient_subspace_predtoken.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi bash slurm/gradient_subspace_predtoken.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause bash slurm/gradient_subspace_predtoken.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut bash slurm/gradient_subspace_predtoken.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u bash slurm/gradient_subspace_predtoken.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi bash slurm/gradient_subspace_predtoken.sh

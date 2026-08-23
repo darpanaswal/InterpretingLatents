@@ -65,5 +65,3 @@ python -u -m experiments.random_corruption \
     --codi_batch_size "${CODI_BATCH_SIZE}" \
     --n_seeds "${NUM_SEEDS}" \
     >> "${LOG_FILE}" 2>&1
-
-# TO RUN, COPY: bash slurm/random_corruption.sh

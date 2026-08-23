@@ -70,5 +70,24 @@ python -u -B -m experiments.extract_thoughts \
     --n_gpus "${N_GPUS}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/extract_thoughts.sh
-# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi SPLIT=both bash slurm/extract_thoughts.sh
+# RUN GPT2
+
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi SPLIT=both bash slurm/extract_thoughts.sh
+
+# RUN LLAMA
+
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u SPLIT=both bash slurm/extract_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi SPLIT=both bash slurm/extract_thoughts.sh

@@ -79,5 +79,24 @@ python -u -B -m experiments.geometry.markovianity_test \
     --n_gpus "${N_GPUS}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/markovianity_test.sh
-# TO OVERRIDE, COPY: TASK=all MODEL_FAMILY=llama MODEL=codi PROJECT_TO_SUBSPACE=pred_and_gold bash slurm/markovianity_test.sh
+# RUN GPT2
+
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause bash slurm/markovianity_test.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/markovianity_test.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/markovianity_test.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi bash slurm/markovianity_test.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause bash slurm/markovianity_test.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/markovianity_test.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/markovianity_test.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi bash slurm/markovianity_test.sh
+
+# RUN LLAMA
+
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/markovianity_test.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut bash slurm/markovianity_test.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u bash slurm/markovianity_test.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi bash slurm/markovianity_test.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause bash slurm/markovianity_test.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut bash slurm/markovianity_test.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u bash slurm/markovianity_test.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi bash slurm/markovianity_test.sh

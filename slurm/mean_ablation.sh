@@ -70,5 +70,24 @@ PYTHONUNBUFFERED=1 python -u -m experiments.geometry.mean_ablation \
     --model_family "${MODEL_FAMILY}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/mean_ablation.sh
-# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi bash slurm/mean_ablation.sh
+# RUN GPT2
+
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause bash slurm/mean_ablation.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/mean_ablation.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/mean_ablation.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi bash slurm/mean_ablation.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause bash slurm/mean_ablation.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/mean_ablation.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/mean_ablation.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi bash slurm/mean_ablation.sh
+
+# RUN LLAMA
+
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/mean_ablation.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut bash slurm/mean_ablation.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u bash slurm/mean_ablation.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi bash slurm/mean_ablation.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause bash slurm/mean_ablation.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut bash slurm/mean_ablation.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u bash slurm/mean_ablation.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi bash slurm/mean_ablation.sh

@@ -78,5 +78,26 @@ else
         >> "${LOG_FILE}" 2>&1
 fi
 
-# TO RUN, COPY: bash slurm/variance_decomposition.sh
-# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi bash slurm/variance_decomposition.sh
+# RUN GPT2
+
+# MODEL_FAMILY=gpt2 bash slurm/variance_decomposition.sh   # all task/model pairs
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause bash slurm/variance_decomposition.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/variance_decomposition.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/variance_decomposition.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi bash slurm/variance_decomposition.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause bash slurm/variance_decomposition.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/variance_decomposition.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/variance_decomposition.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi bash slurm/variance_decomposition.sh
+
+# RUN LLAMA
+
+# MODEL_FAMILY=llama bash slurm/variance_decomposition.sh  # all task/model pairs
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/variance_decomposition.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut bash slurm/variance_decomposition.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u bash slurm/variance_decomposition.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi bash slurm/variance_decomposition.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause bash slurm/variance_decomposition.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut bash slurm/variance_decomposition.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u bash slurm/variance_decomposition.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi bash slurm/variance_decomposition.sh

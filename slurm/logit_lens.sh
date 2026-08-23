@@ -65,5 +65,24 @@ python -u -m experiments.dead_salmon.logit_lens \
     --k "${K}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/logit_lens.sh
-# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi bash slurm/logit_lens.sh
+# RUN GPT2
+
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause bash slurm/logit_lens.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/logit_lens.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/logit_lens.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi bash slurm/logit_lens.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause bash slurm/logit_lens.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/logit_lens.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/logit_lens.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi bash slurm/logit_lens.sh
+
+# RUN LLAMA
+
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/logit_lens.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut bash slurm/logit_lens.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u bash slurm/logit_lens.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi bash slurm/logit_lens.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause bash slurm/logit_lens.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut bash slurm/logit_lens.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u bash slurm/logit_lens.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi bash slurm/logit_lens.sh

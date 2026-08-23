@@ -12,8 +12,8 @@ import os
 import re
 import shutil
 
-os.environ.setdefault("HF_HUB_OFFLINE", "0")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "0")
+os.environ.pop("HF_HUB_OFFLINE", None)
+os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
 from huggingface_hub import HfApi, login, snapshot_download, list_repo_files
 from huggingface_hub.errors import HFValidationError

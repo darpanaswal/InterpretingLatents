@@ -52,5 +52,3 @@ CMD=(
 )
 
 "${CMD[@]}" > "${LOG_FILE}" 2>&1
-
-# TO RUN, COPY: bash slurm/diag_logit_lens.sh

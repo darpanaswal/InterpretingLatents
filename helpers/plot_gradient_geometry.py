@@ -15,9 +15,9 @@ Writes
     Plots/gradient_geometry/
         cos_panels_{model_family}.pdf             -- gold subspace stability cos^2(B_t, B_{t+1})
         cos_panels_{model_family}_pred.pdf         -- pred subspace, same plot
-    Tables/statistical/
-        subspace_geometry_{family}.tex            -- gold per-family appendix tables
-        (pred subspace has plots only; no LaTeX table is produced for it)
+
+The subspace_geometry_{family}.tex appendix tables (gold and pred) are
+built by plot_gradient_subspace_dimensionality.py, not here.
 
 The Q1 / Q2 alignment-of-variance-component panels were removed: they
 conflate magnitude, rank, and per-sample vs population alignment, and
@@ -62,7 +62,6 @@ plt.rcParams.update({
 OUT_DIR = BASE_DIR / "outputs" / "gradient_geometry"
 OUT_DIR_PRED = BASE_DIR / "outputs" / "gradient_geometry_predtoken"
 PLOT_DIR = Path("Plots/gradient_geometry")
-TABLE_DIR = Path("Tables/statistical")
 
 # Subspace sources to discover + plot: (label, source dir, filename suffix).
 # Gold keeps the legacy unsuffixed filenames; pred sits alongside with
@@ -71,10 +70,6 @@ SOURCES = [
     ("gold", OUT_DIR, ""),
     ("pred", OUT_DIR_PRED, "_pred"),
 ]
-
-# Recurrent models: their 7th timestep (index 6) has rank 0 and
-# must be excluded when computing averages.
-RECURRENT_MODELS = {"coconut", "coconut_u", "codi"}
 
 MODEL_LABELS = {
     "coconut":   "C",
@@ -155,7 +150,7 @@ def discover_results(out_dir):
                     continue
                 t = int(key[len("B_t"):])
                 bases[t] = blob[key]
-                
+
         results.append({
             "family":    family,
             "task":      r["task"],
@@ -186,7 +181,7 @@ def plot_cos_panels(results, out_path):
     for j, task in enumerate(tasks):
         task_results = sorted(by_task[task], key=lambda r: sort_model_key(r["model"]))
         ax = axes[0][j]
-        
+
         # Determine all x points
         all_xs = set()
         for r in task_results:
@@ -199,20 +194,20 @@ def plot_cos_panels(results, out_path):
         if not all_xs:
             continue
         all_xs = sorted(list(all_xs))
-        
+
         endpoints = []
-        
+
         for r in task_results:
             model = r["model"]
             ys = np.array(r["diagnosis"]["q3_adjacent_per_t"])
             xs = np.arange(len(ys)) + 0.5
-            
+
             if model in ["coconut", "coconut_u", "codi"] and len(ys) > 0:
                 ys = ys[:-1]
                 xs = xs[:-1]
-            
+
             style = MODEL_STYLE.get(model, {"color": "black", "marker": "o", "ls": "-"})
-            
+
             ax.plot(xs, ys,
                     color=style["color"],
                     marker=style["marker"],
@@ -221,7 +216,7 @@ def plot_cos_panels(results, out_path):
                     markeredgewidth=0.3,
                     markeredgecolor="black",
                     zorder=3)
-                    
+
             if len(ys) > 0:
                 endpoints.append((ys[0], model, xs[0], style["color"]))
 
@@ -236,17 +231,17 @@ def plot_cos_panels(results, out_path):
         endpoints.sort(key=lambda item: item[0])
         placed = []
         staggered = []
-        
-        bottom_threshold = ylim[0] + 0.08 * y_range 
+
+        bottom_threshold = ylim[0] + 0.08 * y_range
 
         for item in endpoints:
             y_val = item[0]
             label_y = max(y_val, bottom_threshold)
-            
+
             for py in placed:
                 if abs(label_y - py) < min_gap:
                     label_y = py + min_gap
-            
+
             label_y = min(label_y, ylim[1] - 0.03 * y_range)
             placed.append(label_y)
             staggered.append((*item, label_y))
@@ -275,7 +270,7 @@ def plot_cos_panels(results, out_path):
         ax.set_xlabel("Timestep $t$", fontsize=7)
         if j == 0:
             ax.set_ylabel(r"Mean $\cos^2(B_t, B_{t+1})$", fontsize=7)
-            
+
         left_pad = -0.2
         right_pad = 2.0
         ax.set_xlim(min(all_xs) + left_pad, max(all_xs) + right_pad)
@@ -303,155 +298,12 @@ def plot_cos_panels(results, out_path):
     print(f"[plot] {out_path}")
 
 
-def _active_ranks(ranks, model):
-    """Return ranks for active timesteps only (skip t=6 for recurrent models)."""
-    if model in RECURRENT_MODELS:
-        return [r for r in ranks[:-1] if r > 0]
-    return [r for r in ranks if r > 0]
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Per-family appendix table
-# ═══════════════════════════════════════════════════════════════════
-
-def build_per_family_geometry_table(family, family_results, source="gold", suffix="") -> str:
-    """Build one appendix table for a single model family.
-
-    `source`/`suffix` distinguish the gold-subspace table (default,
-    unsuffixed, unchanged from before) from the predicted-token-subspace
-    table (source="pred", suffix="_pred") so captions/labels don't collide
-    when both are generated.
-    """
-    sorted_results = sorted(
-        family_results,
-        key=lambda r: (sort_task_key(r["task"]), sort_model_key(r["model"])),
-    )
-    if not sorted_results:
-        return ""
-
-    T = sorted_results[0]["diagnosis"]["T"]
-    family_label = FAMILY_LABELS.get(family, family)
-    subspace_label = ("gold-answer" if source == "gold"
-                       else "model-predicted-token")
-
-    t_headers = " & ".join([f"$k_{{{t}}}$" for t in range(T)])
-    col_spec = "ll" + "r" * T + "r" + "c" + "c" + "r"
-
-    lines = [
-        r"\begin{table}[h!]",
-        r"\centering",
-        r"\small",
-        r"\setlength{\tabcolsep}{2.5pt}",
-        (rf"\caption{{Gradient-subspace diagnostics for the "
-         rf"{family_label} family, {subspace_label} subspace. "
-         r"Per-timestep subspace rank $k_t$ at "
-         r"$\rho{=}0.95$, mean rank $\bar k$ (degenerate final step "
-         r"excluded for recurrent models), adjacent-step similarity "
-         r"$\overline{\cos^2}(B_t, B_{t+1})$, off-diagonal mean "
-         r"similarity $\overline{\cos^2}(B_t, B_{t'})$ with 95\% "
-         r"bootstrap CIs, and the pooled norm fraction "
-         r"$\|h^c\|/\|h\|$ retained in the causal subspace.}"),
-        rf"\label{{tab:subspace_geometry_{family}{suffix}}}",
-        rf"\begin{{tabular}}{{{col_spec}}}",
-        r"\toprule",
-        (f"Task & Model & {t_headers} & $\\bar k$ "
-         r"& Adj.\ $\overline{\cos^2}$ "
-         r"& Off-diag.\ $\overline{\cos^2}$ "
-         r"& $\|h^c\|/\|h\|$" + r" \\"),
-        r"\midrule",
-    ]
-
-    for t_idx, task in enumerate(TASK_ORDER):
-        task_results = [r for r in sorted_results if r["task"] == task]
-        if not task_results:
-            continue
-        if t_idx > 0:
-            lines.append(r"\midrule")
-
-        n_models = len(task_results)
-        task_str = TASK_LABELS.get(task, task).replace("-", r"-\\")
-        task_cell = (rf"\multirow{{{n_models}}}{{*}}"
-                     rf"{{\makecell[l]{{{task_str}}}}}")
-
-        for m_idx, r in enumerate(task_results):
-            model = r["model"]
-            d = r["diagnosis"]
-            ranks = d["subspace_ranks"]
-
-            active = _active_ranks(ranks, model)
-            mean_k = float(np.mean(active)) if active else 0.0
-
-            q3_adj = d.get("q3_adjacent_per_t", [])
-            q3_adj_active = (q3_adj[:-1]
-                             if model in RECURRENT_MODELS and q3_adj
-                             else q3_adj)
-            q3_adj_mean = (float(np.mean(q3_adj_active))
-                           if q3_adj_active else float("nan"))
-
-            q3_offdiag_mean = d.get("q3_offdiag_mean", float("nan"))
-            q3_offdiag_ci = d.get("q3_offdiag_ci", [None, None])
-
-            q4_pooled = d.get("q4_norm_budget_pooled", {})
-            q4_mean = q4_pooled.get("mean", float("nan"))
-
-            rank_cells = [
-                (r"\textcolor{gray}{--}" if rk == 0 else str(rk))
-                for rk in ranks
-            ]
-
-            q3_adj_str = (f"${q3_adj_mean:.3f}$"
-                          if not np.isnan(q3_adj_mean) else "--")
-
-            if q3_offdiag_ci[0] is not None and q3_offdiag_ci[1] is not None:
-                hw = (q3_offdiag_ci[1] - q3_offdiag_ci[0]) / 2
-                q3_od_str = (rf"${q3_offdiag_mean:.3f}"
-                             rf" {{\scriptstyle \pm {hw:.3f}}}$")
-            else:
-                q3_od_str = f"${q3_offdiag_mean:.3f}$"
-
-            q4_str = (f"${q4_mean:.3f}$"
-                      if not np.isnan(q4_mean) else "--")
-
-            first_col = task_cell if m_idx == 0 else ""
-            cells = [
-                first_col,
-                MODEL_LABELS.get(model, model),
-                *rank_cells,
-                f"{mean_k:.1f}",
-                q3_adj_str,
-                q3_od_str,
-                q4_str,
-            ]
-            lines.append(" & ".join(cells) + r" \\")
-
-    lines += [
-        r"\bottomrule",
-        r"\end{tabular}",
-        r"\end{table}",
-    ]
-    return "\n".join(lines)
-
-
-def build_all_family_geometry_tables(results, source="gold", suffix="") -> dict:
-    """Return {family: latex_str} for every family present in results."""
-    families = sorted(
-        {r["family"] for r in results}, key=sort_family_key
-    )
-    out = {}
-    for family in families:
-        fam_results = [r for r in results if r["family"] == family]
-        out[family] = build_per_family_geometry_table(
-            family, fam_results, source=source, suffix=suffix)
-    return out
-
-
 # ═══════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
     PLOT_DIR.mkdir(parents=True, exist_ok=True)
-    TABLE_DIR.mkdir(parents=True, exist_ok=True)
 
     any_found = False
     for source, out_dir, suffix in SOURCES:
@@ -471,16 +323,6 @@ def main():
             fam_results = [r for r in results if r["family"] == family]
             plot_path = PLOT_DIR / f"cos_panels_{family}{suffix}.pdf"
             plot_cos_panels(fam_results, plot_path)
-
-        # ── Per-family geometry tables (both gold and pred subspaces) ────
-        family_tables = build_all_family_geometry_tables(
-            results, source=source, suffix=suffix)
-        for family, tex in family_tables.items():
-            if not tex:
-                continue
-            p = TABLE_DIR / f"subspace_geometry_{family}{suffix}.tex"
-            p.write_text(tex)
-            print(f"[tex ] Geometry table [{source}/{family}] -> {p.resolve()}")
 
     if not any_found:
         raise SystemExit(

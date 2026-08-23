@@ -51,7 +51,7 @@ if [ -n "${SNAPSHOT_FILE:-}" ]; then
     rm -f "${SNAPSHOT_FILE}"
 fi
 module purge
-module load anaconda-py3/2024.06
+module load anaconda-py3/2024.06 git-lfs
 source $WORK/env_cache_guard.sh
 conda activate lrm
 
@@ -88,5 +88,24 @@ fi
 
 "${CMD[@]}" > "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/causal_trace.sh
-# TO OVERRIDE, COPY: TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/causal_trace.sh
+# RUN GPT2
+
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause bash slurm/causal_trace.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/causal_trace.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/causal_trace.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi bash slurm/causal_trace.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause bash slurm/causal_trace.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/causal_trace.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/causal_trace.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi bash slurm/causal_trace.sh
+
+# RUN LLAMA
+
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/causal_trace.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut bash slurm/causal_trace.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u bash slurm/causal_trace.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi bash slurm/causal_trace.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause bash slurm/causal_trace.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut bash slurm/causal_trace.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u bash slurm/causal_trace.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi bash slurm/causal_trace.sh

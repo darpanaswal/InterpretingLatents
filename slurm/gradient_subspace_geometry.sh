@@ -9,7 +9,7 @@ EXPERIMENT="gradient_subspace_geometry"
 TASK="${TASK:-gsm}"
 MODEL_FAMILY="${MODEL_FAMILY:-llama}"
 MODEL="${MODEL:-codi}"
-SUBSPACE_SOURCE="${SUBSPACE_SOURCE:-both}"  # gold | pred | both
+SUBSPACE_SOURCE="${SUBSPACE_SOURCE:-pred}"  # gold | pred | both
 N_GPUS="${N_GPUS:-1}"
 WALLTIME="${WALLTIME:-02:00:00}"
 ########################################
@@ -66,5 +66,24 @@ python -u -m experiments.geometry.gradient_subspace_geometry \
     --subspace_source "${SUBSPACE_SOURCE}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/gradient_subspace_geometry.sh
-# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi bash slurm/gradient_subspace_geometry.sh
+# RUN GPT2
+
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause bash slurm/gradient_subspace_geometry.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/gradient_subspace_geometry.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/gradient_subspace_geometry.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi bash slurm/gradient_subspace_geometry.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause bash slurm/gradient_subspace_geometry.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/gradient_subspace_geometry.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/gradient_subspace_geometry.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi bash slurm/gradient_subspace_geometry.sh
+
+# RUN LLAMA
+
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/gradient_subspace_geometry.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut bash slurm/gradient_subspace_geometry.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u bash slurm/gradient_subspace_geometry.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi bash slurm/gradient_subspace_geometry.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause bash slurm/gradient_subspace_geometry.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut bash slurm/gradient_subspace_geometry.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u bash slurm/gradient_subspace_geometry.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi bash slurm/gradient_subspace_geometry.sh

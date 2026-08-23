@@ -61,5 +61,16 @@ python -u -m experiments.dead_salmon.superposition \
     --mode "${MODE}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/superposition.sh
-# TO OVERRIDE, COPY: MODEL_FAMILY=llama MODE=codi bash slurm/superposition.sh
+# RUN GPT2
+
+# MODEL_FAMILY=gpt2 MODE=pause bash slurm/superposition.sh
+# MODEL_FAMILY=gpt2 MODE=coconut bash slurm/superposition.sh
+# MODEL_FAMILY=gpt2 MODE=coconut_u bash slurm/superposition.sh
+# MODEL_FAMILY=gpt2 MODE=codi bash slurm/superposition.sh
+
+# RUN LLAMA
+
+# MODEL_FAMILY=llama MODE=pause bash slurm/superposition.sh
+# MODEL_FAMILY=llama MODE=coconut bash slurm/superposition.sh
+# MODEL_FAMILY=llama MODE=coconut_u bash slurm/superposition.sh
+# MODEL_FAMILY=llama MODE=codi bash slurm/superposition.sh

@@ -71,5 +71,24 @@ torchrun --nproc_per_node="${N_GPUS}" --master_port="${MASTER_PORT}" \
     --models "${MODEL}" \
     >> "${LOG_FILE}" 2>&1
 
-# TO RUN, COPY: bash slurm/remove_thoughts.sh
-# TO OVERRIDE, COPY: TASK=gsm MODEL_FAMILY=llama MODEL=codi bash slurm/remove_thoughts.sh
+# RUN GPT2
+
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=pause bash slurm/remove_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/remove_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/remove_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=gpt2 MODEL=codi bash slurm/remove_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=pause bash slurm/remove_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut bash slurm/remove_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=coconut_u bash slurm/remove_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=gpt2 MODEL=codi bash slurm/remove_thoughts.sh
+
+# RUN LLAMA
+
+# TASK=prosqa MODEL_FAMILY=llama MODEL=pause bash slurm/remove_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut bash slurm/remove_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=coconut_u bash slurm/remove_thoughts.sh
+# TASK=prosqa MODEL_FAMILY=llama MODEL=codi bash slurm/remove_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=pause bash slurm/remove_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut bash slurm/remove_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=coconut_u bash slurm/remove_thoughts.sh
+# TASK=gsm    MODEL_FAMILY=llama MODEL=codi bash slurm/remove_thoughts.sh

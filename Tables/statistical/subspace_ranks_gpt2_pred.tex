@@ -1,0 +1,22 @@
+\begin{table}[h!]
+\centering
+\small
+\setlength{\tabcolsep}{2.5pt}
+\caption{Gradient-subspace diagnostics for the GPT-2 family, model-predicted-token subspace. Per-timestep subspace rank $k_t$ at $\rho{=}0.95$, mean rank $\bar k$ (degenerate final step excluded for recurrent models), adjacent-step similarity $\overline{\cos^2}(B_t, B_{t+1})$, off-diagonal mean similarity $\overline{\cos^2}(B_t, B_{t'})$ with 95\% bootstrap CIs, and the pooled norm fraction $\|h^c\|/\|h\|$ retained in the causal subspace.}
+\label{tab:subspace_geometry_gpt2_pred}
+\begin{tabular}{llrrrrrrrrccr}
+\toprule
+Task & Model & $k_{0}$ & $k_{1}$ & $k_{2}$ & $k_{3}$ & $k_{4}$ & $k_{5}$ & $k_{6}$ & $\bar k$ & Adj.\ $\overline{\cos^2}$ & Off-diag.\ $\overline{\cos^2}$ & $\|h^c\|/\|h\|$ \\
+\midrule
+\multirow{4}{*}{\makecell[l]{Graph-\\Hopping}} & PaT & 11 & 12 & 12 & 12 & 11 & 12 & 12 & 11.7 & $0.879$ & $0.683 {\scriptstyle \pm 0.033}$ & $0.255$ \\
+ & C & 11 & 12 & 12 & 12 & 12 & 12 & \textcolor{gray}{--} & 11.8 & $0.967$ & $0.654 {\scriptstyle \pm 0.031}$ & $0.027$ \\
+ & C$_u$ & 16 & 14 & 20 & 17 & 15 & 11 & \textcolor{gray}{--} & 15.5 & $0.489$ & $0.199 {\scriptstyle \pm 0.010}$ & $0.044$ \\
+ & CODI & 16 & 35 & 37 & 38 & 39 & 39 & \textcolor{gray}{--} & 34.0 & $0.908$ & $0.598 {\scriptstyle \pm 0.007}$ & $0.097$ \\
+\midrule
+\multirow{4}{*}{\makecell[l]{Arithmetic-\\Reasoning}} & PaT & 188 & 166 & 132 & 96 & 115 & 150 & 139 & 140.9 & $0.729$ & $0.650 {\scriptstyle \pm 0.017}$ & $0.631$ \\
+ & C & 140 & 111 & 137 & 140 & 156 & 120 & \textcolor{gray}{--} & 134.0 & $0.525$ & $0.397 {\scriptstyle \pm 0.016}$ & $0.436$ \\
+ & C$_u$ & 153 & 128 & 126 & 141 & 136 & 141 & \textcolor{gray}{--} & 137.5 & $0.600$ & $0.423 {\scriptstyle \pm 0.010}$ & $0.355$ \\
+ & CODI & 56 & 15 & 70 & 19 & 66 & 17 & \textcolor{gray}{--} & 40.5 & $0.313$ & $0.367 {\scriptstyle \pm 0.011}$ & $0.368$ \\
+\bottomrule
+\end{tabular}
+\end{table}
