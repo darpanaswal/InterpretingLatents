@@ -10,7 +10,7 @@ EXPERIMENT="markovianity_test"
 TASK="${TASK:-prosqa}"
 MODEL_FAMILY="${MODEL_FAMILY:-llama}"
 MODEL="${MODEL:-codi}"
-PROJECT_TO_SUBSPACE="${PROJECT_TO_SUBSPACE:-all}"
+PROJECT_TO_SUBSPACE="${PROJECT_TO_SUBSPACE:-pred}"
 # Sharding unit is (order, "core"|mlp_seed) -- an order's core analysis
 # plus one unit per --mlp_seeds value (default 3 seeds) -- so parallelism
 # isn't capped by the number of orders: even a single valid order gives

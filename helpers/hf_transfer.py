@@ -3,7 +3,7 @@ thoughts/ dataset folder, and download models/checkpoints.
 
 Usage:
     python helpers/hf_transfer.py upload-checkpoint --local_dir model/gsm/codi/ --repo_id darpanaswal/gsm-codi
-    python helpers/hf_transfer.py upload-thoughts --repo_id myuser/thoughts [--private]
+    python helpers/hf_transfer.py upload-thoughts --repo_id myuser/thoughts [--private] [--model_family gpt|llama]
     python helpers/hf_transfer.py download --repo_id thomas-ferraz/model_name-pause-GSM8kAug-Jun8-ckpt19 --local_dir model/gsm/llama/pause
 """
 
@@ -36,7 +36,14 @@ def upload_checkpoint(local_dir: str, repo_id: str):
         )
 
 
-def upload_thoughts(repo_id: str, private: bool):
+_MODEL_FAMILY_DIRS = {"gpt": "gpt2", "llama": "llama"}
+
+
+def upload_thoughts(repo_id: str, private: bool, model_family: str = None):
+    folder_path = THOUGHTS / _MODEL_FAMILY_DIRS[model_family] if model_family else THOUGHTS
+    if not os.path.isdir(folder_path):
+        raise FileNotFoundError(f"{folder_path} does not exist")
+
     api = HfApi(token=hf_token)
     api.create_repo(
         repo_id=repo_id,
@@ -47,9 +54,9 @@ def upload_thoughts(repo_id: str, private: bool):
     api.upload_large_folder(
         repo_id=repo_id,
         repo_type="dataset",
-        folder_path=str(THOUGHTS),
+        folder_path=str(folder_path),
     )
-    print(f"Uploaded {THOUGHTS} to https://huggingface.co/datasets/{repo_id}")
+    print(f"Uploaded {folder_path} to https://huggingface.co/datasets/{repo_id}")
 
 
 def smart_download(repo_id: str, local_dir: str, **kw):
@@ -106,6 +113,12 @@ def main():
     p_upload_thoughts = sub.add_parser("upload-thoughts", help="Upload the thoughts/ folder as a HF dataset")
     p_upload_thoughts.add_argument("--repo_id", required=True, help="e.g. myuser/thoughts")
     p_upload_thoughts.add_argument("--private", action="store_true")
+    p_upload_thoughts.add_argument(
+        "--model_family",
+        choices=["gpt", "llama"],
+        default=None,
+        help="Only upload thoughts/<model_family> (e.g. thoughts/gpt2). Omit to upload the whole thoughts/ folder.",
+    )
 
     p_download = sub.add_parser("download", help="Download a model/checkpoint (repo or subfolder) from the Hub")
     p_download.add_argument("--repo_id", required=True, help="repo id, URL, or repo/subpath")
@@ -118,7 +131,7 @@ def main():
     if args.command == "upload-checkpoint":
         upload_checkpoint(args.local_dir, args.repo_id)
     elif args.command == "upload-thoughts":
-        upload_thoughts(args.repo_id, args.private)
+        upload_thoughts(args.repo_id, args.private, args.model_family)
     elif args.command == "download":
         print(BASE_DIR)
         smart_download(args.repo_id, args.local_dir)
