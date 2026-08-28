@@ -1,0 +1,22 @@
+\begin{table*}[h!]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Gold-label vs.\ predicted-token subspace alignment across tasks for the GPT-2 model family. Each $t_i$ column reports $\overline{\cos^2\theta}$ between $B_t^{\text{gold}}$ and $B_t^{\text{pred}}$ at that timestep (1 = same subspace, 0 = orthogonal); the $\overline{\cos^2\theta}$ column is the mean over $t$, and the control column is the same statistic for rank-matched random subspaces.}
+\label{tab:gold_pred_angle_gpt2}
+\begin{tabular}{llrrrrrrrrr}
+\toprule
+Task & Model & $t_{0}$ & $t_{1}$ & $t_{2}$ & $t_{3}$ & $t_{4}$ & $t_{5}$ & $t_{6}$ & $\overline{\cos^2\theta}$ & Control $\overline{\cos^2\theta}$ \\
+\midrule
+\multirow{4}{*}{\makecell[l]{Graph-Hopping}} & PaT & 0.620 & 0.700 & 0.708 & 0.656 & 0.768 & 0.709 & 0.663 & 0.689 & 0.021 \\
+ & C & 0.611 & 0.563 & 0.529 & 0.566 & 0.530 & 0.566 & -- & 0.561 & 0.013 \\
+ & C$_u$ & 0.536 & 0.534 & 0.593 & 0.554 & 0.541 & 0.639 & -- & 0.566 & 0.019 \\
+ & CODI & 0.802 & 0.718 & 0.725 & 0.721 & 0.724 & 0.722 & -- & 0.735 & 0.039 \\
+\midrule
+\multirow{4}{*}{\makecell[l]{Arithmetic-Reasoning}} & PaT & 0.702 & 0.694 & 0.678 & 0.668 & 0.677 & 0.662 & 0.670 & 0.679 & 0.194 \\
+ & C & 0.676 & 0.679 & 0.669 & 0.669 & 0.722 & 0.651 & -- & 0.678 & 0.153 \\
+ & C$_u$ & 0.720 & 0.703 & 0.691 & 0.700 & 0.713 & 0.679 & -- & 0.701 & 0.153 \\
+ & CODI & 0.796 & 0.903 & 0.838 & 0.931 & 0.857 & 0.952 & -- & 0.880 & 0.045 \\
+\bottomrule
+\end{tabular}
+\end{table*}
