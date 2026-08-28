@@ -762,7 +762,7 @@ def main():
                     help="Output directory for per-family bar figures.")
     ap.add_argument("--out_main_dir",  default="Tables/main",
                     help="Output directory for main-text LaTeX tables.")
-    ap.add_argument("--out_stats_dir", default="Tables/statistical",
+    ap.add_argument("--out_stats_dir", default="Tables/extended",
                     help="Output directory for appendix statistical LaTeX tables.")
     ap.add_argument("--debug", action="store_true",
                     help="Print every path probed and collected values, then exit.")

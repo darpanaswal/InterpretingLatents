@@ -21,7 +21,7 @@ Plots (written to Plots/variance_decomposition/pca_<model>/<task>/):
 
 Aggregate paper files:
     - Tables/main/variance_decomposition_<family>.tex
-    - Tables/statistical/variance_decomposition_<family>.tex
+    - Tables/extended/variance_decomposition_<family>.tex
 
 Usage:
     python -m experiments.geometry.variance_decomposition --task prosqa --model coconut
@@ -539,7 +539,7 @@ def main():
                              "Tables/main/variance_decomposition_<family>.tex")
     parser.add_argument("--out_appendix", default=None,
                         help="Override appendix TeX path. Default: "
-                             "Tables/statistical/variance_decomposition_<family>.tex")
+                             "Tables/extended/variance_decomposition_<family>.tex")
     args = parser.parse_args()
 
     families = ["gpt2", "llama"] if args.model_family == "both" else [args.model_family]
@@ -569,7 +569,7 @@ def main():
                 BASE_DIR / "Tables" / "main" / f"variance_decomposition_{family}.tex"
             )
             out_appendix = args.out_appendix or str(
-                BASE_DIR / "Tables" / "statistical" / f"variance_decomposition_{family}.tex"
+                BASE_DIR / "Tables" / "extended" / f"variance_decomposition_{family}.tex"
             )
             out_main, out_appendix = write_tex_tables(
                 out_main, out_appendix, family=family)

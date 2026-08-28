@@ -277,35 +277,19 @@ def plot_heatmaps(data, out_path, subspace_source="gold"):
     plt.close(fig)
     print(f"[plot] {out_path}")
 
-def build_appendix_table(data, family, out_path, subspace_source="gold"):
+def build_appendix_table(data_by_source, family, out_path):
+    """data_by_source: {"gold": data, "pred": data}, each as returned by
+    discover_results(). The "Full" (unprojected) rows are identical across
+    sources, so they're emitted once; the "Subspace" rows are emitted per
+    source, gold on top and predicted-token subspace on the bottom."""
     # LaTeX formatting functions
     def _fmt_ci(pt, ci):
         if pt is None: return "--"
         if ci is None: return f"{pt:.3f}"
         return f"{pt:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
 
-    sub_row_label = ("Subspace" if subspace_source == "gold"
-                     else "Subspace(pred)")
-    src_caption = ("gold-answer gradient subspace" if subspace_source == "gold"
-                   else "predicted-token gradient subspace")
-    src_tag = "" if subspace_source == "gold" else "_pred"
-
-    lines = [
-        r"\begin{table}[h!]",
-        r"\centering",
-        r"\tiny",
-        r"\setlength{\tabcolsep}{4pt}",
-        r"\begin{tabular}{llrrrrrrrr}",
-        r"\toprule",
-        r"& & \multicolumn{4}{c}{\textbf{Graph-Hopping}} & \multicolumn{4}{c}{\textbf{Arithmetic-Reasoning}} \\",
-        r"\cmidrule(lr){3-6}\cmidrule(lr){7-10}",
-        r"Proj. & Model & " + " & ".join([PREDICTOR_LABELS[p] for p in PREDICTOR_KEYS]) + " & " + " & ".join([PREDICTOR_LABELS[p] for p in PREDICTOR_KEYS]) + r" \\",
-        r"\midrule",
-    ]
-
-    proj_rows = [(False, "Full"), (True, sub_row_label)]
-
-    for p_idx, (proj, proj_label) in enumerate(proj_rows):
+    def _proj_rows(data, proj, proj_label):
+        rows = []
         for m_idx, model in enumerate(MODEL_ORDER):
             row_cells = []
             if m_idx == 0:
@@ -321,18 +305,48 @@ def build_appendix_table(data, family, out_path, subspace_source="gold"):
                     ci = cell_data.get("ci", {}).get(p)
                     row_cells.append(_fmt_ci(pt, ci))
 
-            lines.append(" & ".join(row_cells) + r" \\")
+            rows.append(" & ".join(row_cells) + r" \\")
+        return rows
 
-        if p_idx < len(proj_rows) - 1:
+    lines = [
+        r"\begin{table*}[h!]",
+        r"\centering",
+        r"\tiny",
+        r"\setlength{\tabcolsep}{4pt}",
+        r"\begin{tabular}{llrrrrrrrr}",
+        r"\toprule",
+        r"& & \multicolumn{4}{c}{\textbf{Graph-Hopping}} & \multicolumn{4}{c}{\textbf{Arithmetic-Reasoning}} \\",
+        r"\cmidrule(lr){3-6}\cmidrule(lr){7-10}",
+        r"Proj. & Model & " + " & ".join([PREDICTOR_LABELS[p] for p in PREDICTOR_KEYS]) + " & " + " & ".join([PREDICTOR_LABELS[p] for p in PREDICTOR_KEYS]) + r" \\",
+        r"\midrule",
+    ]
+
+    # "Full" (unprojected) rows: identical across gold/pred, emit once from
+    # whichever source is available.
+    any_data = data_by_source.get("gold") or data_by_source.get("pred")
+    lines += _proj_rows(any_data, False, "Full")
+    lines.append(r"\midrule")
+
+    subspace_labels = [
+        ("gold", r"\makecell{Subspace\\(Gold)}"),
+        ("pred", r"\makecell{Subspace\\(Pred)}"),
+    ]
+    available = [(k, lbl) for k, lbl in subspace_labels if k in data_by_source]
+    for i, (key, label) in enumerate(available):
+        lines += _proj_rows(data_by_source[key], True, label)
+        if i < len(available) - 1:
             lines.append(r"\midrule")
+
+    family_label = {"gpt2": "GPT-2", "llama": "Llama-3.2"}.get(family, family)
+    caption = (rf"Full results for Markovianity of thought trajectories experiment "
+               rf"with statistical testing for the {family_label} model family.")
 
     lines += [
         r"\bottomrule",
         r"\end{tabular}",
-        rf"\caption{{Markovianity $R^2$ at order 1, test-set with 95\% "
-        rf"bootstrap CIs ({family}). Projected row uses the {src_caption}.}}",
-        rf"\label{{tab:markovianity_{family}{src_tag}}}",
-        r"\end{table}",
+        rf"\caption{{{caption}}}",
+        rf"\label{{tab:markovianity_{family}}}",
+        r"\end{table*}",
     ]
 
     with open(out_path, "w") as f:
@@ -384,15 +398,14 @@ def main():
                 subspace_source=subspace_source,
             )
 
-        # Appendix tables: one per subspace source, mirroring the heatmap
-        # loop above. Gold keeps the legacy unsuffixed filename; pred sits
-        # alongside with a "_pred" suffix so neither overwrites the other.
-        for subspace_source in ("gold", "pred"):
-            data = discover_results(data_dir, subspace_source=subspace_source)
-            src_tag = "" if subspace_source == "gold" else "_pred"
-            out_path = tables_dir / f"markovianity_{family}{src_tag}.tex"
-            build_appendix_table(data, family, out_path,
-                                 subspace_source=subspace_source)
+        # Appendix table: one merged file per family, gold subspace rows on
+        # top and predicted-token subspace rows on the bottom.
+        data_by_source = {
+            subspace_source: discover_results(data_dir, subspace_source=subspace_source)
+            for subspace_source in ("gold", "pred")
+        }
+        out_path = tables_dir / f"markovianity_{family}.tex"
+        build_appendix_table(data_by_source, family, out_path)
 
 
 if __name__ == "__main__":

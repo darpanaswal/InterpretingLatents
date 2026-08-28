@@ -1,8 +1,8 @@
-\begin{table}[h!]
+\begin{table*}[h!]
 \centering
 \small
 \setlength{\tabcolsep}{2.5pt}
-\caption{Gradient-subspace diagnostics for the Llama family, model-predicted-token subspace. Per-timestep subspace rank $k_t$ at $\rho{=}0.95$, mean rank $\bar k$ (degenerate final step excluded for recurrent models), adjacent-step similarity $\overline{\cos^2}(B_t, B_{t+1})$, off-diagonal mean similarity $\overline{\cos^2}(B_t, B_{t'})$ with 95\% bootstrap CIs, and the pooled norm fraction $\|h^c\|/\|h\|$ retained in the causal subspace.}
+\caption{Gradient-subspace (predicted-token) diagnostics across tasks for the Llama-3.2 model family.}
 \label{tab:subspace_geometry_llama_pred}
 \begin{tabular}{llrrrrrrrrccr}
 \toprule
@@ -19,4 +19,4 @@ Task & Model & $k_{0}$ & $k_{1}$ & $k_{2}$ & $k_{3}$ & $k_{4}$ & $k_{5}$ & $k_{6
  & CODI & 153 & 144 & 128 & 176 & 140 & 101 & \textcolor{gray}{--} & 140.3 & $0.387$ & $0.285 {\scriptstyle \pm 0.014}$ & $0.527$ \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}

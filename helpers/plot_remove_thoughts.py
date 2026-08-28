@@ -302,7 +302,7 @@ def build_main_table(data: dict, family: str) -> str:
 
 def build_appendix_table(data: dict, family: str) -> str:
     lines = [
-        r"\begin{table}[h!]",
+        r"\begin{table*}[h!]",
         r"\centering",
         r"\small",
         r"\setlength{\tabcolsep}{4pt}",
@@ -336,13 +336,16 @@ def build_appendix_table(data: dict, family: str) -> str:
                 f"{entry['n'] or '--'} \\\\"
             )
 
+    family_label = {"gpt2": "GPT-2", "llama": "Llama-3.2"}.get(family, family)
+    caption = (rf"Full results for latent thought ablation at test-time "
+               rf"with statistical testing for the {family_label} model family.")
+
     lines += [
         r"\bottomrule",
         r"\end{tabular}",
-        rf"\caption{{Thought-token ablation statistical tests ({family}). "
-        r"$^{*}p{<}0.05$, $^{**}p{<}0.01$, $^{***}p{<}0.001$ (exact two-sided McNemar).}",
+        rf"\caption{{{caption}}}",
         rf"\label{{tab:ablation_stats_{family}}}",
-        r"\end{table}",
+        r"\end{table*}",
     ]
     return "\n".join(lines).strip()
 
