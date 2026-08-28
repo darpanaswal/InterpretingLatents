@@ -4,8 +4,6 @@
 
 Code to reproduce the experiments in *Observable Patterns Are Not Explanations: A Causal-Geometric Analysis of Latent Reasoning Models*. [Paper (arXiv)](https://arxiv.org/pdf/2606.12689)
 
-Instructions below follow the order of the paper. Every experiment is run with a direct `python`/`torchrun` command (not the `slurm/`/`oarsh/` wrapper scripts, which only add cluster submission around the same commands). Set `TASK` to `prosqa` (graph-hopping) or `gsm` (arithmetic-reasoning), `MODEL_FAMILY` to `gpt2` or `llama`, and `MODEL` to one of `pause` (PaT), `coconut` (C), `coconut_u` (Cu), or `codi` (CODI).
-
 ## Setup
 
 ```bash
@@ -14,7 +12,19 @@ pip install -r requirements.txt
 
 Set `HUGGINGFACE_API_KEY` in a `.env` file at the repo root if you need to pull models/datasets from the Hub (only `helpers/hf_transfer.py` requires it).
 
-Before running any experiment, train (or download) the target model and its controls — see [Appendix D: Models, Controls, and Training](#appendix-d-models-controls-and-training) below.
+Before running any experiment, train or download the target model and its controls. All trained checkpoints (GPT-2 and Llama-3.2-1B-Instruct, all tasks and controls) are available at the [Hugging Face collection](https://hf.co/collections/darpanaswal/latent-reasoning-models). See also [Appendix D: Models, Controls, and Training](#appendix-d-models-controls-and-training) below.
+
+Some experiments (§6 Markovianity, and several extended analyses) require pre-extracted latent thoughts:
+
+```bash
+python -u -B -m experiments.extract_thoughts \
+    --task prosqa \
+    --model_family gpt2 \
+    --model pause \
+    --split both \
+    --n_thoughts 6 \
+    --n_gpus 1
+```
 
 ---
 
@@ -154,18 +164,6 @@ python helpers/plot_gradient_geometry.py
 
 The following reproduce Appendix A (Llama-3.2-1B-Instruct extension of §4–§6, same commands as above with `--model_family llama`) and Appendix B (additional analyses). Run at your discretion — these receive secondary emphasis in the paper.
 
-### Extract latent thoughts (needed by several extended analyses)
-
-```bash
-python -u -B -m experiments.extract_thoughts \
-    --task prosqa \
-    --model_family gpt2 \
-    --model pause \
-    --split both \
-    --n_thoughts 6 \
-    --n_gpus 1
-```
-
 ### Predicted-token gradient subspace
 
 ```bash
@@ -260,7 +258,7 @@ Full bootstrap CIs and McNemar significance tables are generated as a byproduct 
 
 ## Appendix D: Models, Controls, and Training
 
-Models are trained separately per `(dataset, model_family, model)` combination. Hyperparameters are listed in the paper (Tables 29–30, Appendix D.3); training scripts are not included in this cleanup — obtain or train checkpoints and place them under `model/<task>/<model_family>/<model>/` (see `src/config.py` for exact paths) before running any experiment above.
+Models are trained separately per `(dataset, model_family, model)` combination. Hyperparameters are listed in the paper (Tables 29–30, Appendix D.3); training scripts are not included in this cleanup. Download checkpoints from the [Hugging Face collection](https://hf.co/collections/darpanaswal/latent-reasoning-models) or train your own, and place them under `model/<task>/<model_family>/<model>/` (see `src/config.py` for exact paths) before running any experiment above.
 
 ---
 
