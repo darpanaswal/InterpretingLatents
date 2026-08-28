@@ -1,8 +1,8 @@
-\begin{table}[h!]
+\begin{table*}[h!]
 \centering
 \small
 \setlength{\tabcolsep}{2.5pt}
-\caption{Gradient-subspace diagnostics for the GPT-2 family. Per-timestep subspace rank $k_t$ at $\rho{=}0.95$, mean rank $\bar k$ (degenerate final step excluded for recurrent models), adjacent-step similarity $\overline{\cos^2}(B_t, B_{t+1})$, off-diagonal mean similarity $\overline{\cos^2}(B_t, B_{t'})$ with 95\% bootstrap CIs, and the pooled norm fraction $\|h^c\|/\|h\|$ retained in the causal subspace.}
+\caption{Gradient-subspace diagnostics across tasks for the GPT-2 model family.}
 \label{tab:subspace_geometry_gpt2}
 \begin{tabular}{llrrrrrrrrccr}
 \toprule
@@ -19,4 +19,4 @@ Task & Model & $k_{0}$ & $k_{1}$ & $k_{2}$ & $k_{3}$ & $k_{4}$ & $k_{5}$ & $k_{6
  & CODI & 51 & 14 & 64 & 18 & 57 & 13 & \textcolor{gray}{--} & 36.2 & $0.271$ & $0.351 {\scriptstyle \pm 0.016}$ & $0.306$ \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}

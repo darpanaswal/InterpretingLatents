@@ -60,7 +60,7 @@ FAMILY_ORDER = ["gpt2", "llama"]
 
 FAMILY_LABELS = {
     "gpt2":  "GPT-2",
-    "llama": "Llama",
+    "llama": "Llama-3.2",
 }
 
 
@@ -163,19 +163,15 @@ def build_per_family_geometry_table(family, family_results, source="gold", suffi
     col_spec = "ll" + "r" * T + "r" + "c" + "c" + "r"
 
     lines = [
-        r"\begin{table}[h!]",
+        r"\begin{table*}[h!]",
         r"\centering",
         r"\small",
         r"\setlength{\tabcolsep}{2.5pt}",
-        (rf"\caption{{Gradient-subspace diagnostics for the "
-         rf"{family_label} family, {subspace_label} subspace. "
-         r"Per-timestep subspace rank $k_t$ at "
-         r"$\rho{=}0.95$, mean rank $\bar k$ (degenerate final step "
-         r"excluded for recurrent models), adjacent-step similarity "
-         r"$\overline{\cos^2}(B_t, B_{t+1})$, off-diagonal mean "
-         r"similarity $\overline{\cos^2}(B_t, B_{t'})$ with 95\% "
-         r"bootstrap CIs, and the pooled norm fraction "
-         r"$\|h^c\|/\|h\|$ retained in the causal subspace.}"),
+        (rf"\caption{{Gradient-subspace (predicted-token) diagnostics across "
+         rf"tasks for the {family_label} model family.}}"
+         if source == "pred" else
+         rf"\caption{{Gradient-subspace diagnostics across tasks for the "
+         rf"{family_label} model family.}}"),
         rf"\label{{tab:subspace_geometry_{family}{suffix}}}",
         rf"\begin{{tabular}}{{{col_spec}}}",
         r"\toprule",
@@ -252,7 +248,7 @@ def build_per_family_geometry_table(family, family_results, source="gold", suffi
     lines += [
         r"\bottomrule",
         r"\end{tabular}",
-        r"\end{table}",
+        r"\end{table*}",
     ]
     return "\n".join(lines)
 

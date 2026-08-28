@@ -63,7 +63,7 @@ plt.rcParams.update({
 MODELS = [
     ("pause",     "PaT"),
     ("coconut",   "C"),
-    ("coconut_u", r"$C_u$"),
+    ("coconut_u", r"C$_u$"),
     ("codi",      "CODI"),
 ]
 TASKS = [
@@ -407,36 +407,69 @@ def _mcnemar_cell(r):
     if not r or not r.get("p_value"): return f"-- ({r['b_a_only'] if r else '?'},{r['c_b_only'] if r else '?'})"
     return f"{r['p_value']:.4f}{_stars(r['p_value'])} ({r['b_a_only']},{r['c_b_only']})"
 
+PROMPT_BUCKETS = ["P_full", "P_max", "P_b", "A_b"]
+THOUGHT_BUCKETS = ["T_1", "T_2", "T_3", "T_4", "T_5", "T_6", "T_full"]
+PROMPT_BUCKETS_TEX = [t for b, t in zip(BUCKETS, BUCKETS_TEX) if b in PROMPT_BUCKETS]
+THOUGHT_BUCKETS_TEX = [t for b, t in zip(BUCKETS, BUCKETS_TEX) if b in THOUGHT_BUCKETS]
+
+FAMILY_LABELS = {"gpt2": "GPT-2", "llama": "Llama-3.2"}
+
 def build_appendix_table(stats_per_panel, *, corruption, granularity, tau, mode, family):
-    n_buckets = len(BUCKETS)
-    title_text = "Causal Trace" if mode == "restorative" else "Reverse Causal Trace"
+    title_text = "Full causal tracing results" if mode == "restorative" else "Full reverse causal tracing results"
     lbl_prefix = "causal_trace" if mode == "restorative" else "rev_causal_trace"
+    family_label = FAMILY_LABELS.get(family, family)
 
-    lines = [
-        r"\begin{table}[h!]", r"\centering", r"\tiny", r"\setlength{\tabcolsep}{2.5pt}",
-        r"\begin{tabular}{l " + "c" * n_buckets + r" c cc r}", r"\toprule",
-        ("Model & " + " & ".join(BUCKETS_TEX) + r" & $\overline{\text{KL}_{c\to c'}}$ " + r"& Wilc.\ $p$ & McN.\ $p$ ($\tau{=}" + f"{tau}" + r"$) & $n$ \\"),
+    # ── prompt-positions table ──────────────────────────────────────
+    n_prompt = len(PROMPT_BUCKETS)
+    prompt_lines = [
+        r"\begin{table*}[h!]", r"\centering", r"\tiny", r"\setlength{\tabcolsep}{2.5pt}",
+        r"\begin{tabular}{l ccc c cc cc r}", r"\toprule",
+        ("Model & " + " & ".join(PROMPT_BUCKETS_TEX) + r" & $\overline{\text{KL}_{c\to c'}}$ "
+         + r"& Wilc.\ $p$ & McN.\ $p$ ($\tau{=}" + f"{tau}" + r"$) & $n$ \\"),
     ]
-
     for task, task_label in TASKS:
-        lines += [r"\midrule", rf"\multicolumn{{{n_buckets + 5}}}{{c}}{{\textbf{{{task_label}}}}} \\", r"\midrule"]
+        prompt_lines += [r"\midrule", rf"\multicolumn{{{n_prompt + 5}}}{{c}}{{\textbf{{{task_label}}}}} \\", r"\midrule"]
         for model_dir, model_label in MODELS:
             entry = stats_per_panel[task].get(model_dir)
             if entry is None:
-                lines.append(f"{model_label} & " + " & ".join(["--"] * (n_buckets + 3)) + r" & -- \\")
+                prompt_lines.append(f"{model_label} & " + " & ".join(["--"] * (n_prompt + 3)) + r" & -- \\")
                 continue
-            lines.append(f"{model_label} & " + " & ".join([_ci_cell(entry["bucket_ci"][b]) for b in BUCKETS]) + f" & {_ci_cell(entry['klc_ref'])} & {_wilcoxon_cell(entry['wilcoxon'])} & {_mcnemar_cell(entry['mcnemar'])} & {entry['n_kept']} \\\\")
-
-    caption = (rf"{title_text} bucket statistics ({family}, corruption: \texttt{{{corruption}}}, "
-               rf"granularity: \texttt{{{granularity}}}, $\tau{{=}}{tau}$). "
-               r"$^{*}p{<}0.05$, $^{**}p{<}0.01$, $^{***}p{<}0.001$.")
-    lines += [
+            prompt_lines.append(
+                f"{model_label} & " + " & ".join([_ci_cell(entry["bucket_ci"][b]) for b in PROMPT_BUCKETS])
+                + f" & {_ci_cell(entry['klc_ref'])} & {_wilcoxon_cell(entry['wilcoxon'])} & {_mcnemar_cell(entry['mcnemar'])} & {entry['n_kept']} \\\\"
+            )
+    prompt_lines += [
         r"\bottomrule", r"\end{tabular}",
-        rf"\caption{{{caption}}}",
-        rf"\label{{tab:{lbl_prefix}_{family}}}",
-        r"\end{table}",
+        rf"\caption{{{title_text} with statistical testing (prompt-positions) for the {family_label} model family.}}",
+        rf"\label{{tab:{lbl_prefix}_prompt_{family}}}",
+        r"\end{table*}",
     ]
-    return "\n".join(lines).strip()
+
+    # ── thought-positions table ─────────────────────────────────────
+    n_thought = len(THOUGHT_BUCKETS)
+    thought_lines = [
+        r"\begin{table*}[h!]", r"\centering", r"\tiny", r"\setlength{\tabcolsep}{2.5pt}",
+        r"\begin{tabular}{l " + "c" * n_thought + r"}", r"\toprule",
+        ("Model & " + " & ".join(THOUGHT_BUCKETS_TEX) + r" \\"),
+    ]
+    for task, task_label in TASKS:
+        thought_lines += [r"\midrule", rf"\multicolumn{{{n_thought + 1}}}{{c}}{{\textbf{{{task_label}}}}} \\", r"\midrule"]
+        for model_dir, model_label in MODELS:
+            entry = stats_per_panel[task].get(model_dir)
+            if entry is None:
+                thought_lines.append(f"{model_label} & " + " & ".join(["--"] * n_thought) + r" \\")
+                continue
+            thought_lines.append(
+                f"{model_label} & " + " & ".join([_ci_cell(entry["bucket_ci"][b]) for b in THOUGHT_BUCKETS]) + r" \\"
+            )
+    thought_lines += [
+        r"\bottomrule", r"\end{tabular}",
+        rf"\caption{{{title_text} with statistical testing (thought-positions) for the {family_label} model family.}}",
+        rf"\label{{tab:{lbl_prefix}_thought_{family}}}",
+        r"\end{table*}",
+    ]
+
+    return "\n".join(prompt_lines).strip() + "\n\n" + "\n".join(thought_lines).strip()
 
 
 # ═════════════════════════════════════════════════════════════════════

@@ -321,13 +321,18 @@ def collect_amplification(root: Path, family: str = "gpt2", debug: bool = False)
                 amp[task][dir_name] = None
                 continue
 
-            n_inst = (
-                summary.get("n_instances")
-                or len(summary.get("grad_amplification", {})
-                              .get(str(summary.get("alphas", [None])[0]), {})
-                              .get("flipped_indices", []))
-                or None
-            )
+            # "n_total" (dataset size) lives per-alpha inside grad_amplification;
+            # it's constant across alphas, so any entry gives the true n.
+            # (Previously this fell back to len(flipped_indices) -- the count
+            # of instances that flipped at the first alpha, not the dataset
+            # size -- which is why displayed n fluctuated with alpha/model.)
+            grad_amp = summary.get("grad_amplification", {})
+            n_inst = summary.get("n_instances")
+            if n_inst is None:
+                for entry in grad_amp.values():
+                    if entry.get("n_total") is not None:
+                        n_inst = entry["n_total"]
+                        break
 
             amp[task][dir_name] = {
                 "alphas":  [float(a) for a in summary.get("alphas", [])],
@@ -710,29 +715,28 @@ def build_amplification_lineplot(amp: dict, out_pdf: Path):
 # Appendix table 1: Ablation statistical tests
 # ────────────────────────────────────────────────────────────────────────────
 
-def build_ablation_stats_table(data: dict, family: str = "") -> str:
-    lines = [
-        r"\begin{table}[h!]",
-        r"\centering",
-        r"\small",
-        r"\setlength{\tabcolsep}{3pt}",
-        r"\begin{tabular}{l ccc cc cc c}",
-        r"\toprule",
-        (r"Model "
-         r"& Acc$_{\text{orig}}$ [\% CI] "
-         r"& Acc$_{\text{grad}}$ [\% CI] "
-         r"& Acc$_{\text{rand}}$ [\% CI] "
-         r"& $\Delta_{\text{grad}}$ [\% CI] "
-         r"& McNemar$_{\text{grad}}$ $p$ "
-         r"& $\Delta_{\text{rand}}$ [\% CI] "
-         r"& McNemar$_{\text{rand}}$ $p$ "
-         r"& $n$ \\"),
-    ]
+FAMILY_LABELS = {"gpt2": "GPT-2", "llama": "Llama-3.2"}
 
+# (dict key, subspace section label)
+SUBSPACE_SOURCES = [
+    ("gold", "Gold Subspace"),
+    ("pred", "Predicted-Token Subspace"),
+]
+
+def _ablation_caption(family: str) -> str:
+    return (rf"Full gradient-subspace ablation results with statistical "
+             rf"testing for the {FAMILY_LABELS.get(family, family)} model family.")
+
+def _amp_caption(family: str) -> str:
+    return (rf"Full gradient-subspace amplification results with statistical "
+             rf"testing for the {FAMILY_LABELS.get(family, family)} model family.")
+
+def _ablation_body_lines(data: dict) -> list:
+    lines = []
     for task, task_label in TASKS:
         lines += [
             r"\midrule",
-            rf"\multicolumn{{9}}{{c}}{{\textbf{{{task_label}}}}} \\",
+            rf"\multicolumn{{8}}{{c}}{{\textbf{{{task_label}}}}} \\",
             r"\midrule",
         ]
 
@@ -740,7 +744,7 @@ def build_ablation_stats_table(data: dict, family: str = "") -> str:
             entry = data[task].get(dir_name)
             if entry is None:
                 lines.append(
-                    f"{col_label} & -- & -- & -- & -- & -- & -- & -- & -- \\\\"
+                    f"{col_label} & -- & -- & -- & -- & -- & -- & -- \\\\"
                 )
                 continue
             lines.append(
@@ -751,18 +755,46 @@ def build_ablation_stats_table(data: dict, family: str = "") -> str:
                 f"{diff_pct(entry['diff_grad'])} & "
                 f"{fmt_mcnemar(entry['mc_grad'])} & "
                 f"{diff_pct(entry['diff_rand'])} & "
-                f"{fmt_mcnemar(entry['mc_rand'])} & "
-                f"{entry['n'] or '--'} \\\\"
+                f"{fmt_mcnemar(entry['mc_rand'])} \\\\"
             )
+    return lines
+
+def build_ablation_stats_table(data_by_source: dict, family: str = "") -> str:
+    # No "n" column: ablation_results.json carries no instance-count field
+    # for this table (unlike the amplification table), so it was always "--".
+    lines = [
+        r"\begin{table*}[h!]",
+        r"\centering",
+        r"\tiny",
+        r"\setlength{\tabcolsep}{3pt}",
+        r"\begin{tabular}{l ccc cc cc}",
+        r"\toprule",
+        (r"Model "
+         r"& Acc$_{\text{orig}}$ [\% CI] "
+         r"& Acc$_{\text{grad}}$ [\% CI] "
+         r"& Acc$_{\text{rand}}$ [\% CI] "
+         r"& $\Delta_{\text{grad}}$ [\% CI] "
+         r"& McNemar$_{\text{grad}}$ $p$ "
+         r"& $\Delta_{\text{rand}}$ [\% CI] "
+         r"& McNemar$_{\text{rand}}$ $p$ \\"),
+    ]
+
+    for key, subspace_label in SUBSPACE_SOURCES:
+        data = data_by_source.get(key)
+        if data is None:
+            continue
+        lines += [
+            r"\midrule",
+            rf"\multicolumn{{8}}{{c}}{{\textbf{{{subspace_label}}}}} \\",
+        ]
+        lines += _ablation_body_lines(data)
 
     lines += [
         r"\bottomrule",
         r"\end{tabular}",
-        rf"\caption{{Gradient-subspace ablation statistical tests ({family}). "
-        r"$^{*}p{<}0.05$, $^{**}p{<}0.01$, $^{***}p{<}0.001$ "
-        r"(exact two-sided McNemar).}",
+        rf"\caption{{{_ablation_caption(family)}}}",
         rf"\label{{tab:gradsubspace_ablation_stats_{family}}}",
-        r"\end{table}",
+        r"\end{table*}",
     ]
     return "\n".join(lines).strip()
 
@@ -771,90 +803,94 @@ def build_ablation_stats_table(data: dict, family: str = "") -> str:
 # Appendix table 2: Amplification statistical tests (full per-α grid)
 # ────────────────────────────────────────────────────────────────────────────
 
-def build_amp_stats_table(amp: dict, family: str = "") -> str:
-    lines = [
-        r"\begin{table}[h!]",
-        r"\centering",
-        r"\tiny",
-        r"\setlength{\tabcolsep}{3pt}",
-        r"\begin{tabular}{l l | cccc c | cccc c}",
-        r"\toprule",
-        r"& & \multicolumn{5}{c}{Graph-Hopping} & \multicolumn{5}{c}{Arithmetic-Reasoning} \\",
-        r"\cmidrule(lr){3-7} \cmidrule(lr){8-12}",
-        (r"Model & $\alpha$ "
-         r"& Flip$_{\text{grad}}$ [\% CI] "
-         r"& Flip$_{\text{rand}}$ [\% CI] "
-         r"& $\Delta$ [\% CI] "
-         r"& McNemar $p$ "
-         r"& $n$ "
-         r"& Flip$_{\text{grad}}$ [\% CI] "
-         r"& Flip$_{\text{rand}}$ [\% CI] "
-         r"& $\Delta$ [\% CI] "
-         r"& McNemar $p$ "
-         r"& $n$ \\"),
-        r"\midrule",
-    ]
+def _amp_body_lines(amp: dict) -> list:
+    lines = []
+    for task, task_label in TASKS:
+        lines += [
+            r"\midrule",
+            rf"\multicolumn{{7}}{{c}}{{\textbf{{{task_label}}}}} \\",
+            r"\midrule",
+        ]
 
-    for i, (dir_name, col_label, _) in enumerate(MODELS):
-        alphas_set = set()
-        for task, _ in TASKS:
+        for i, (dir_name, col_label, _) in enumerate(MODELS):
             entry = amp[task].get(dir_name)
-            if entry is not None:
-                alphas_set.update(a for a in entry["alphas"] if a >= 1.5)
-        
-        display_alphas = sorted(alphas_set)
-        if not display_alphas:
-            lines.append(f"{col_label} & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\\\")
-            lines.append(r"\midrule")
+            display_alphas = sorted(a for a in entry["alphas"] if a >= 1.5) if entry is not None else []
+
+            if not display_alphas:
+                lines.append(f"{col_label} & -- & -- & -- & -- & -- & -- \\\\")
+                if i < len(MODELS) - 1:
+                    lines.append(r"\midrule")
+                continue
+
+            first_row = True
+            for a in display_alphas:
+                row_parts = []
+
+                model_cell = col_label if first_row else ""
+                row_parts.append(model_cell)
+                row_parts.append(fmt_alpha(a))
+
+                g_jl, r_jl, d_jl, m_jl = get_amp_jsonl_records(entry["records"], a)
+                g_fb, r_fb, d_fb, m_fb = get_amp_ci(entry["raw"], a)
+
+                g = g_jl or g_fb
+                r = r_jl or r_fb
+                d = d_jl or d_fb
+                m = m_jl or m_fb
+
+                n_val = entry["n"] if first_row else ""
+
+                row_parts.append(ci_pct(g))
+                row_parts.append(ci_pct(r))
+                row_parts.append(diff_pct(d))
+                row_parts.append(fmt_mcnemar(m))
+                row_parts.append(str(n_val))
+
+                lines.append(" & ".join(row_parts) + r" \\")
+                first_row = False
+
+            if i < len(MODELS) - 1:
+                lines.append(r"\midrule")
+    return lines
+
+def build_amp_stats_tables(amp_by_source: dict, family: str = "") -> list:
+    """One \\begin{table*}...\\end{table*} per available subspace source.
+
+    The merged (gold+pred) amplification table is too tall to fit a page
+    even at \\tiny (4 models x 7 alphas x 2 tasks x 2 subspaces), so each
+    subspace gets its own table block instead of being folded into rows."""
+    tag_by_key = {"gold": "gold", "pred": "predtoken"}
+    word_by_key = {"gold": "Gold", "pred": "Predicted-token"}
+
+    tables = []
+    for key, _ in SUBSPACE_SOURCES:
+        amp = amp_by_source.get(key)
+        if amp is None:
             continue
-
-        first_row = True
-        for a in display_alphas:
-            row_parts = []
-            
-            model_cell = col_label if first_row else ""
-            row_parts.append(model_cell)
-            row_parts.append(fmt_alpha(a))
-            
-            for task, _ in TASKS:
-                entry = amp[task].get(dir_name)
-                if entry is None or a not in entry["alphas"]:
-                    row_parts.extend(["--", "--", "--", "--", "--"])
-                else:
-                    g_jl, r_jl, d_jl, m_jl = get_amp_jsonl_records(entry["records"], a)
-                    g_fb, r_fb, d_fb, m_fb = get_amp_ci(entry["raw"], a)
-
-                    g = g_jl or g_fb
-                    r = r_jl or r_fb
-                    d = d_jl or d_fb
-                    m = m_jl or m_fb
-                    
-                    n_val = entry["n"] if first_row else ""
-                    
-                    row_parts.append(ci_pct(g))
-                    row_parts.append(ci_pct(r))
-                    row_parts.append(diff_pct(d))
-                    row_parts.append(fmt_mcnemar(m))
-                    row_parts.append(str(n_val))
-
-            lines.append(" & ".join(row_parts) + r" \\")
-            first_row = False
-            
-        lines.append(r"\midrule")
-
-    if lines and lines[-1] == r"\midrule":
-        lines.pop()
-
-    lines += [
-        r"\bottomrule",
-        r"\end{tabular}",
-        rf"\caption{{Gradient-subspace amplification flip-rate statistics ({family}). "
-        r"$^{*}p{<}0.05$, $^{**}p{<}0.01$, $^{***}p{<}0.001$ "
-        r"(exact two-sided McNemar on per-instance flip indicators).}",
-        rf"\label{{tab:gradsubspace_amp_stats_{family}}}",
-        r"\end{table}",
-    ]
-    return "\n".join(lines).strip()
+        lines = [
+            r"\begin{table*}[h!]",
+            r"\centering",
+            r"\tiny",
+            r"\setlength{\tabcolsep}{4pt}",
+            r"\begin{tabular}{l l cccc c}",
+            r"\toprule",
+            (r"Model & $\alpha$ "
+             r"& Flip$_{\text{grad}}$ [\% CI] "
+             r"& Flip$_{\text{rand}}$ [\% CI] "
+             r"& $\Delta$ [\% CI] "
+             r"& McNemar $p$ "
+             r"& $n$ \\"),
+        ]
+        lines += _amp_body_lines(amp)
+        lines += [
+            r"\bottomrule",
+            r"\end{tabular}",
+            rf"\caption{{{_amp_caption(family)} ({word_by_key[key]} subspace.)}}",
+            rf"\label{{tab:gradsubspace_amp_stats_{tag_by_key[key]}_{family}}}",
+            r"\end{table*}",
+        ]
+        tables.append("\n".join(lines).strip())
+    return tables
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -873,22 +909,6 @@ def discover_families(root: Path) -> list:
     return known + extra
 
 
-def _relabel_predtoken(abl_stats: str, amp_stats: str, family: str) -> tuple:
-    """Re-label LaTeX \\label keys and captions so they don't collide with gold."""
-    abl_stats = abl_stats.replace(
-        f"tab:gradsubspace_ablation_stats_{family}",
-        f"tab:gradsubspace_predtoken_ablation_stats_{family}",
-    ).replace("ablation statistical tests (",
-              "ablation statistical tests, predicted-token subspace (")
-    amp_stats = amp_stats.replace(
-        f"tab:gradsubspace_amp_stats_{family}",
-        f"tab:gradsubspace_predtoken_amp_stats_{family}",
-    ).replace("amplification flip-rate statistics (",
-              "amplification flip-rate statistics, predicted-token "
-              "subspace (")
-    return abl_stats, amp_stats
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -905,20 +925,30 @@ def main():
     out_tables = args.out_tables_dir
     out_tables.mkdir(parents=True, exist_ok=True)
 
-    any_found = False
+    # Union of families found across both sources.
+    families_by_source = {}
     for source in SOURCES:
-        root = source["root"]
-        families = discover_families(root)
-        if not families:
-            print(f"[skip] {source['name']}: no families found under {root}")
-            continue
-        any_found = True
-        print(f"[INFO] ({source['name']}) Families: {families}")
+        families = discover_families(source["root"])
+        families_by_source[source["name"]] = families
+        if families:
+            print(f"[INFO] ({source['name']}) Families: {families}")
+        else:
+            print(f"[skip] {source['name']}: no families found under {source['root']}")
 
-        fig_dir = source["fig_dir"]
-        fig_dir.mkdir(parents=True, exist_ok=True)
+    all_families = sorted(set().union(*families_by_source.values()))
+    if not all_families:
+        raise SystemExit(
+            f"No families found under {SOURCES[0]['root']} or {SOURCES[1]['root']}."
+        )
 
-        for family in families:
+    for family in all_families:
+        abl_by_source = {}
+        amp_by_source = {}
+
+        for source in SOURCES:
+            if family not in families_by_source[source["name"]]:
+                continue
+            root = source["root"]
             abl_data = collect_ablation(root, family=family, debug=args.debug)
             amp_data = collect_amplification(root, family=family, debug=args.debug)
 
@@ -937,24 +967,28 @@ def main():
                         print(f"  {task}/{m}: {ok}")
                 continue
 
-            # Main-text figure (namespaced by family and source).
+            abl_by_source[source["name"]] = abl_data
+            amp_by_source[source["name"]] = amp_data
+
+            # Main-text figure (namespaced by family and source; unchanged, one per source).
+            fig_dir = source["fig_dir"]
+            fig_dir.mkdir(parents=True, exist_ok=True)
             out_fig = fig_dir / source["fig_name"].format(family=family)
             build_amplification_lineplot(amp_data, out_fig)
 
-            # Appendix tables — one combined file per (source, family).
-            abl_stats = build_ablation_stats_table(abl_data, family=family)
-            amp_stats = build_amp_stats_table(amp_data, family=family)
-            if source["relabel"]:
-                abl_stats, amp_stats = _relabel_predtoken(abl_stats, amp_stats, family)
-            combined_stats = abl_stats + "\n\n" + amp_stats
-            p = out_tables / source["table_name"].format(family=family)
-            p.write_text(combined_stats)
-            print(f"[OK] ({source['name']}) Appendix tables -> {p.resolve()}")
+        if args.debug:
+            continue
 
-    if not any_found:
-        raise SystemExit(
-            f"No families found under {SOURCES[0]['root']} or {SOURCES[1]['root']}."
-        )
+        # Appendix tables — one merged file per family. The (short) ablation
+        # table folds gold subspace rows on top of predicted-token subspace
+        # rows; the amplification table is too tall for that fold to fit a
+        # page even at \tiny, so it gets one table* block per subspace instead.
+        abl_stats = build_ablation_stats_table(abl_by_source, family=family)
+        amp_tables = build_amp_stats_tables(amp_by_source, family=family)
+        combined_stats = "\n\n".join([abl_stats] + amp_tables)
+        p = out_tables / f"gradient_subspace_interventions_{family}.tex"
+        p.write_text(combined_stats)
+        print(f"[OK] Appendix tables -> {p.resolve()}")
 
 
 if __name__ == "__main__":

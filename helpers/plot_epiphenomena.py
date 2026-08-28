@@ -567,7 +567,11 @@ def generate_appendix_main_table(results, modes, all_k, ci_data=None, family="")
     top_specs = [(r"$H/\log_2 N$",), (r"Top-1 correct (\%)",)]
     bot_specs = [(r"$P(\text{correct})$",), (r"Cand.\ mass",)]
 
-    fam_suffix = f" ({family})" if family else ""
+    family_label = {"gpt2": "GPT-2", "llama": "Llama-3.2"}.get(family, family)
+    caption = (f"Full results for superposition and BFS-probing across timesteps "
+               f"and models with statistical testing for the {family_label} model family."
+               if family else
+               "Full results for superposition and BFS-probing across timesteps and models with statistical testing.")
     latex = [
         "\\begin{table*}[!t]",
         "\\centering",
@@ -582,7 +586,7 @@ def generate_appendix_main_table(results, modes, all_k, ci_data=None, family="")
     latex += _bfs_header_block(modes, bot_specs)
     latex += _bfs_data_rows(results, modes, all_k, ci_data, bot_blocks)
     latex += ["\\bottomrule", "\\end{tabular}",
-              f"\\caption{{Full standard-probing results across timesteps and models{fam_suffix}.}}",
+              f"\\caption{{{caption}}}",
               f"\\label{{tab:appendix_bfs_probing_{family or 'combined'}}}",
               "\\end{table*}", ""]
     return "\n".join(latex)
@@ -703,7 +707,7 @@ def generate_table_scratchpad_probing(results, modes, all_k, ci_data=None, famil
         return f"{p:.1f} \\textsubscript{{({lo:.1f}, {hi:.1f})}}"
 
     latex = [
-        "\\begin{table}[h!]",
+        "\\begin{table*}[h!]",
         "\\centering",
         "\\small",
         "\\begin{tabular}{ll ccc}",
@@ -712,7 +716,7 @@ def generate_table_scratchpad_probing(results, modes, all_k, ci_data=None, famil
         "\\midrule"
     ]
 
-    labels = {"base": "B", "cot": "CoT", "pause": "PaT", "coconut": "C", "coconut_u": "$C_u$", "codi": "CODI"}
+    labels = {"base": "B", "cot": "CoT", "pause": "PaT", "coconut": "C", "coconut_u": "C$_u$", "codi": "CODI"}
 
     # ── Per-Step Analysis ──
     for m in modes:
@@ -761,10 +765,11 @@ def generate_table_scratchpad_probing(results, modes, all_k, ci_data=None, famil
 
     latex.append("\\bottomrule")
     latex.append("\\end{tabular}")
-    fam_str = "GPT-2" if family.lower() == "gpt2" else "Llama"
-    latex.append(f"\\caption{{Scratchpad-Thinking probing full statistical results ({fam_str}).}}")
+    fam_str = "GPT-2" if family.lower() == "gpt2" else "Llama-3.2"
+    latex.append(f"\\caption{{Full results for scratchpad-thinking probing across timesteps "
+                 f"and models with statistical testing for the {fam_str} model family.}}")
     latex.append(f"\\label{{tab:scratchpad_{family}}}")
-    latex.append("\\end{table}\n")
+    latex.append("\\end{table*}\n")
 
     return "\n".join(latex)
 
@@ -790,10 +795,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out_dir", type=str, default="Plots/epiphenomena", help="Output directory for merged PDF")
     parser.add_argument("--tables_dir", type=str, default="Tables/statistical", help="Directory for LaTeX tables")
+    parser.add_argument("--extended_tables_dir", type=str, default="Tables/extended", help="Directory for extended LaTeX tables")
     args = parser.parse_args()
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     Path(args.tables_dir).mkdir(parents=True, exist_ok=True)
+    Path(args.extended_tables_dir).mkdir(parents=True, exist_ok=True)
 
     for model_family in ("gpt2", "llama"):
         # 1. Load Superposition Data
@@ -831,11 +838,11 @@ def main():
         if sup_results:
             with open(f"{args.tables_dir}/superposition_{model_family}.tex", "w") as f:
                 f.write(generate_appendix_main_table(sup_results, _MODES_ORDER, sup_k, sup_cis, family=model_family))
-            with open(f"{args.tables_dir}/superposition_extended_{model_family}.tex", "w") as f:
+            with open(f"{args.extended_tables_dir}/superposition_extended_{model_family}.tex", "w") as f:
                 f.write(generate_table_candidate_parallelism(sup_results, _MODES_ORDER, sup_k) + "\n\n")
                 f.write(generate_table_convergence_trajectories(sup_results, _MODES_ORDER) + "\n\n")
                 f.write(generate_table_per_instance_statistics(sup_results, _MODES_ORDER) + "\n")
-            print(f"Saved LaTeX tables to {args.tables_dir}/")
+            print(f"Saved LaTeX tables to {args.tables_dir}/ and {args.extended_tables_dir}/")
 
         # 5. Generate Scratchpad Probing Table (Logit Lens GSM)
         if ll_results:
