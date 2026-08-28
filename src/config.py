@@ -24,12 +24,7 @@ dotenv_path = BASE_DIR / ".env"
 
 load_dotenv(dotenv_path=dotenv_path)
 
-openai_token = os.getenv("OPENAI_API_KEY")
 hf_token = os.getenv("HUGGINGFACE_API_KEY")
-wandb_token = os.getenv("WANDB_API_KEY")
-
-if not openai_token or not hf_token or not wandb_token:
-    raise ValueError("API keys are not set in environment variables")
 
 # ─────────────────────────── Paths ─────────────────────────────────
 DATA_DIR = BASE_DIR / "data"
@@ -52,6 +47,5 @@ GSM_MODELS = MODEL_DIR / "gsm"
 OUTPUTS = BASE_DIR / "outputs"
 CONTROL_EXPT = OUTPUTS / "superposition"
 THOUGHTS = BASE_DIR / "thoughts"
-INLP = OUTPUTS / "inlp"
 VARIANCE_DECOMPOSITION = OUTPUTS / "variance_decomposition"
 THOUGHT_ABLATION = OUTPUTS / "remove_thoughts"

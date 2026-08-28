@@ -20,6 +20,9 @@ from huggingface_hub.errors import HFValidationError
 
 from src.config import hf_token, BASE_DIR, THOUGHTS
 
+if not hf_token:
+    raise ValueError("HUGGINGFACE_API_KEY is not set in environment variables")
+
 
 def upload_checkpoint(local_dir: str, repo_id: str):
     api = HfApi(token=hf_token)
